@@ -337,6 +337,25 @@ test('stop() closes the connection and cancels any pending retry', () => {
   assert.equal(h.sockets().length, 1, '停止后不得再拨号');
 });
 
+test('a state handler that reconnects on DISCONNECTED must not orphan a socket', () => {
+  const h = createHarness({ reconnectDelaysMs: [10] });
+  h.connection.setUrl('ws://service');
+  h.sockets()[0].open();
+
+  // A legitimate consumer reaction to a drop: ask for the same endpoint again.
+  h.connection.setStateChangeHandler((state) => {
+    if (state === CONNECTION_STATES.DISCONNECTED) h.connection.setUrl('ws://service');
+  });
+
+  h.sockets()[0].fireClose();
+  assert.equal(h.sockets().length, 1, '重连应由已排定的重试完成，而不是另建一个');
+
+  h.timers.fireAll();
+
+  assert.equal(h.sockets().length, 2, '整个过程中只应存在两个 socket，不得留下无人管理的连接');
+  assert.equal(h.timers.pendingCount(), 0);
+});
+
 test('raw frames reach the handler, including text that is not JSON', () => {
   const h = createHarness();
   h.connection.setUrl('ws://service');

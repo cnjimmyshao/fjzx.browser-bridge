@@ -230,8 +230,12 @@ export function createServiceConnection(options = {}) {
     ws.onclose = () => {
       if (socket !== ws) return;
       socket = null;
-      setState(CONNECTION_STATES.DISCONNECTED);
+      // Schedule the retry *before* publishing the state. A state handler may
+      // legitimately react to DISCONNECTED by calling setUrl(), and if that ran
+      // first it would dial a socket that this retry then dialled a second,
+      // unmanaged one alongside.
       scheduleReconnect();
+      setState(CONNECTION_STATES.DISCONNECTED);
     };
   }
 
