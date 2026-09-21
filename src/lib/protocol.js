@@ -178,6 +178,9 @@ export function isJsonCompatible(value, path = new Set()) {
   path.add(value);
   try {
     if (Array.isArray(value)) {
+      // A hole is skipped by `every` and a stray property is dropped entirely,
+      // yet both change the value: `new Array(1)` leaves as `[null]`.
+      if (value.length !== Object.keys(value).length) return false;
       return value.every((item) => isJsonCompatible(item, path));
     }
     const prototype = Object.getPrototypeOf(value);

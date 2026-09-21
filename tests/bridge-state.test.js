@@ -372,6 +372,32 @@ test('a throwing state-change handler cannot break the Job', async () => {
   ]);
 });
 
+test('a frame delivered by a previous endpoint is dropped rather than answered', async () => {
+  const h = createHarness();
+  // Handling was deferred while the Work Tab was evaluated and the operator
+  // repointed the Service URL in the meantime.
+  h.connection.repoint('ws://other.test');
+
+  await h.bridge.handleMessage(execute('job-18'), { deliveredOn: 'ws://service.test' });
+
+  assert.deepEqual(h.connection.sent, [], '不得在新端点上回答旧端点发来的帧');
+  assert.equal(h.bridge.state, BRIDGE_STATES.IDLE);
+});
+
+test('a frame delivered on the current endpoint is handled normally', async () => {
+  const h = createHarness();
+  const handling = h.bridge.handleMessage(execute('job-19'), {
+    deliveredOn: 'ws://service.test',
+  });
+  await flush();
+  await h.executor.settle('ok');
+  await handling;
+
+  assert.deepEqual(h.connection.sent, [
+    { type: 'RESULT', jobId: 'job-19', ok: true, data: 'ok' },
+  ]);
+});
+
 test('a Job that resolves with undefined still produces a JSON-compatible RESULT', async () => {
   const h = createHarness();
   const handling = h.bridge.handleMessage(execute('job-12'));

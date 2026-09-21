@@ -220,3 +220,18 @@ test('accepts a null-prototype object, which still serializes as a plain object'
   bare.a = 1;
   assert.equal(isJsonCompatible(bare), true);
 });
+
+test('refuses arrays whose holes or stray properties JSON would change', () => {
+  // `every` skips holes, so they need an explicit check: `new Array(1)` leaves as
+  // `[null]`, and a stray property is dropped entirely.
+  assert.equal(isJsonCompatible(new Array(1)), false);
+  assert.equal(isJsonCompatible([1, , 3]), false);
+  assert.equal(isJsonCompatible([1, undefined, 3]), false);
+
+  const withProperty = [1];
+  withProperty.extra = 'x';
+  assert.equal(isJsonCompatible(withProperty), false);
+
+  assert.equal(isJsonCompatible([1, 2, 3]), true);
+  assert.equal(isJsonCompatible([]), true);
+});

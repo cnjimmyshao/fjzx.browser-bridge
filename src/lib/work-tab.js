@@ -249,6 +249,22 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
   let queryRevision = 0;
   /** Writes are chained so an older snapshot can never land after a newer one. */
   let persistChain = Promise.resolve();
+  /**
+   * Resolves once an evaluation has actually been applied to the tracker, so a
+   * caller can avoid answering out of the not-yet-evaluated defaults. A refresh
+   * that a newer one supersedes never applies its own snapshot, which is why this
+   * cannot simply be the startup refresh's promise.
+   */
+  let markReady;
+  const readyPromise = new Promise((resolve) => {
+    markReady = resolve;
+  });
+  let readySettled = false;
+  const settleReady = () => {
+    if (readySettled) return;
+    readySettled = true;
+    markReady();
+  };
 
   /**
    * Read the memory a previous worker lifetime left behind. Manifest V3 may
@@ -312,6 +328,10 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
       // have been changed synchronously by the event that triggered this refresh.
       publish(trigger);
       persist();
+      // Readiness is settled even on failure: blocking a caller forever on a
+      // query that cannot succeed is worse than answering from the last known
+      // state, which the next tab event will correct.
+      settleReady();
       return;
     }
 
@@ -323,6 +343,7 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
     tracker.applyTabs(found);
     publish(trigger);
     persist();
+    settleReady();
   }
 
   /** Run `work` once the restored memory is in place, in event order. */
@@ -376,5 +397,12 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
       return this.tabId !== null;
     },
     refresh,
+    /**
+     * Resolves once a tab snapshot has actually been applied (or a query attempt
+     * has failed), so callers never answer out of the not-yet-evaluated defaults.
+     */
+    ready() {
+      return readyPromise;
+    },
   };
 }

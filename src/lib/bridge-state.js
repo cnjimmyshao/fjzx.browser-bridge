@@ -168,8 +168,18 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
    * handler must survive it.
    *
    * @param {unknown} raw
+   * @param {{deliveredOn?: string}} [options] the endpoint that delivered the
+   *   frame, captured when it arrived. Handling can be deferred (waiting for the
+   *   first Work Tab evaluation), and a frame must not be answered on an endpoint
+   *   that has replaced the one it came in on.
    */
-  async function handleMessage(raw) {
+  async function handleMessage(raw, options = {}) {
+    const deliveredOn = options.deliveredOn === undefined ? connection.url : options.deliveredOn;
+    if (deliveredOn !== connection.url) {
+      logger.warn?.('[bridge] dropping a frame delivered by a previous endpoint');
+      return;
+    }
+
     const parsed = parseServiceMessage(raw);
 
     if (!parsed.ok) {

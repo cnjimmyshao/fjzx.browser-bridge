@@ -69,17 +69,22 @@ const bridge = createBridgeState({
 });
 
 // Evaluated before the tab listeners can fire, so the initial binding is in
-// place as soon as the worker is up. The promise is kept so inbound frames can
-// wait for it (see the message handler).
-const workTabReady = workTab.refresh('worker-start');
+// place as soon as the worker is up. `ready()` follows through to an evaluation
+// that was actually applied: a startup refresh superseded by a tab event never
+// applies its own snapshot.
+const workTabReady = workTab.refresh('worker-start').then(() => workTab.ready());
 
 connection.setMessageHandler((data) => {
   // The socket can open before the first Work Tab evaluation finishes, and a
   // frame answered in that window would report NO_WORK_TAB for a profile that
-  // does have a Work Tab â€” with no later message to correct it. Waiting costs
-  // nothing once the evaluation is done.
+  // does have a Work Tab â€?with no later message to correct it.
+  //
+  // The endpoint is captured now, not after the wait: the operator may repoint
+  // the Service URL while a frame is queued, and that frame belongs to the
+  // Service that sent it, not to whoever is connected afterwards.
+  const deliveredOn = connection.url;
   void workTabReady
-    .then(() => bridge.handleMessage(data))
+    .then(() => bridge.handleMessage(data, { deliveredOn }))
     .catch((error) => {
       // `handleMessage` already absorbs everything; this only guarantees a
       // surprise can never surface as an unhandled rejection in the worker.
