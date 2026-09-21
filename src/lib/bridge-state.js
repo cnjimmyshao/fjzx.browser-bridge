@@ -4,6 +4,7 @@ import {
   createResultError,
   createResultOk,
   createStatus,
+  isJsonCompatible,
   parseServiceMessage,
 } from './protocol.js';
 
@@ -31,15 +32,6 @@ export const BRIDGE_STATES = Object.freeze({
 
 function describeError(error) {
   return error instanceof Error ? error.message : String(error);
-}
-
-/** The architecture requires a JSON-compatible return value, so this is checked. */
-function isJsonSerializable(value) {
-  try {
-    return JSON.stringify(value) !== undefined || value === undefined;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -118,35 +110,54 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
     return false;
   }
 
-  function finishError(jobId, code, message) {
-    currentJob = null;
-    send(createResultError(jobId, code, message));
-    announceState();
+  /**
+   * Answer the Service that submitted the Job — and only that one.
+   *
+   * A Job outlives the connection it arrived on: the operator may repoint the
+   * Service URL while it runs, in which case the replacement Service must not
+   * receive page data for a Job it never submitted. V1 has no cancellation, so
+   * the Job still finishes; the RESULT simply has nowhere to go.
+   */
+  function sendResultFor(job, message) {
+    if (connection.url !== job.originUrl) {
+      logger.warn?.(
+        `[bridge] dropped ${message.type} for ${job.jobId}: the endpoint changed while it ran`,
+      );
+      return;
+    }
+    send(message);
   }
 
   async function runJob(job) {
     currentJob = job;
     announceState();
 
+    const fail = (message) => {
+      currentJob = null;
+      sendResultFor(job, createResultError(job.jobId, ERROR_CODES.SCRIPT_EXECUTION_FAILED, message));
+      announceState();
+    };
+
     let data;
     try {
       data = await executor.execute({ tabId: job.tabId, script: job.script, input: job.input });
     } catch (error) {
-      finishError(job.jobId, ERROR_CODES.SCRIPT_EXECUTION_FAILED, describeError(error));
+      fail(describeError(error));
       return;
     }
 
-    if (!isJsonSerializable(data)) {
-      finishError(
-        job.jobId,
-        ERROR_CODES.SCRIPT_EXECUTION_FAILED,
-        '返回值不是 JSON-compatible，无法进入 RESULT.data。',
+    // A missing return value has an obvious JSON spelling, so it maps to null;
+    // anything else must survive the trip unchanged.
+    const result = data === undefined ? null : data;
+    if (!isJsonCompatible(result)) {
+      fail(
+        '返回值不是 JSON-compatible（只支持 null/boolean/有限 number/string/array/plain object），拒绝静默改写后返回。',
       );
       return;
     }
 
     currentJob = null;
-    send(createResultOk(job.jobId, data));
+    sendResultFor(job, createResultOk(job.jobId, result));
     announceState();
   }
 
@@ -200,6 +211,9 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
       script: message.script,
       input: message.input,
       tabId: workTab.tabId,
+      // Remembered so the RESULT goes back to the Service that asked, even if the
+      // operator repoints the endpoint while the Job runs.
+      originUrl: connection.url,
     });
   }
 

@@ -143,6 +143,56 @@ export function createResultError(jobId, code, message) {
 }
 
 /**
+ * Is this value something the wire format can carry without changing it?
+ *
+ * `JSON.stringify` succeeding is not the same test: it quietly turns `NaN` and
+ * `Infinity` into `null`, drops `undefined` and function-valued properties, and
+ * flattens a `Map` to `{}`. Emitting `ok: true` with data the script never
+ * returned would be worse than reporting a failure, so the supported types are
+ * checked explicitly against what the architecture allows: null, boolean,
+ * number, string, array and plain object.
+ *
+ * @param {unknown} value
+ * @param {Set<object>} [path] objects on the current branch, to detect cycles
+ *   without rejecting a value that merely appears twice
+ * @returns {boolean}
+ */
+export function isJsonCompatible(value, path = new Set()) {
+  if (value === null) return true;
+
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return true;
+    case 'number':
+      // NaN and Infinity have no JSON spelling; they would silently become null.
+      return Number.isFinite(value);
+    case 'object':
+      break;
+    default:
+      // undefined, function, symbol, bigint
+      return false;
+  }
+
+  if (path.has(value)) return false; // a cycle cannot be serialized
+  path.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.every((item) => isJsonCompatible(item, path));
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      // Date, Map, Set, RegExp, typed arrays: all of them change shape on the way
+      // out, so none of them is "the value the script returned".
+      return false;
+    }
+    return Object.values(value).every((item) => isJsonCompatible(item, path));
+  } finally {
+    path.delete(value);
+  }
+}
+
+/**
  * @param {string} state one of IDLE / RUNNING / NOT_READY
  * @param {{jobId?: string, reason?: string}} [details]
  */

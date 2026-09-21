@@ -6,12 +6,20 @@ import { ERROR_CODES } from '../src/lib/protocol.js';
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-/** Connection stand-in: records what Bridge tried to send. */
-function createFakeConnection({ sendResult = true } = {}) {
+/** Connection stand-in: records what Bridge tried to send, and where. */
+function createFakeConnection({ sendResult = true, url = 'ws://service.test' } = {}) {
   const sent = [];
+  const state = { url };
   return {
     sent,
     sendResult,
+    get url() {
+      return state.url;
+    },
+    /** Simulates the operator repointing the Service URL. */
+    repoint(nextUrl) {
+      state.url = nextUrl;
+    },
     send(text) {
       sent.push(JSON.parse(text));
       return sendResult;
@@ -375,4 +383,89 @@ test('a Job that resolves with undefined still produces a JSON-compatible RESULT
   assert.deepEqual(h.connection.sent, [
     { type: 'RESULT', jobId: 'job-12', ok: true, data: null },
   ]);
+});
+
+test('a RESULT is not delivered to a Service that did not submit the Job', async () => {
+  const h = createHarness();
+  const handling = h.bridge.handleMessage(execute('job-13'));
+  await flush();
+
+  // The operator repoints the Service URL while the Job is still running.
+  h.connection.repoint('ws://other.test');
+  await h.executor.settle('page-derived data');
+  await handling;
+
+  assert.deepEqual(h.connection.sent, [], '替代端点不得收到它没提交过的 Job 结果');
+  assert.equal(h.bridge.state, BRIDGE_STATES.IDLE, 'Job 仍然结束，Bridge 重新可用');
+  assert.equal(h.bridge.currentJobId, null);
+});
+
+test('a RESULT survives a reconnect to the same endpoint', async () => {
+  const h = createHarness();
+  const handling = h.bridge.handleMessage(execute('job-14'));
+  await flush();
+
+  h.connection.repoint('ws://service.test'); // same endpoint, new socket
+  await h.executor.settle('ok');
+  await handling;
+
+  assert.deepEqual(h.connection.sent, [
+    { type: 'RESULT', jobId: 'job-14', ok: true, data: 'ok' },
+  ]);
+});
+
+test('values JSON would silently rewrite are refused instead of corrupted', async () => {
+  const cases = [
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['a nested undefined', { a: undefined }],
+    ['a nested function', { a: () => {} }],
+    ['a Map', new Map([['k', 'v']])],
+    ['a Date', new Date(0)],
+    ['a Set', new Set([1])],
+    ['a bigint', 10n],
+  ];
+
+  for (const [label, value] of cases) {
+    const h = createHarness();
+    const handling = h.bridge.handleMessage(execute('job-15'));
+    await flush();
+    await h.executor.settle(value);
+    await handling;
+
+    assert.equal(h.connection.sent[0].ok, false, `${label} 应被拒绝`);
+    assert.equal(h.connection.sent[0].error.code, ERROR_CODES.SCRIPT_EXECUTION_FAILED);
+    assert.equal(h.bridge.state, BRIDGE_STATES.IDLE);
+  }
+});
+
+test('a cyclic return value is refused rather than thrown over', async () => {
+  const h = createHarness();
+  const handling = h.bridge.handleMessage(execute('job-16'));
+  await flush();
+
+  const cyclic = { name: 'x' };
+  cyclic.self = cyclic;
+  await h.executor.settle(cyclic);
+  await handling;
+
+  assert.equal(h.connection.sent[0].ok, false);
+  assert.equal(h.connection.sent[0].error.code, ERROR_CODES.SCRIPT_EXECUTION_FAILED);
+});
+
+test('a value that merely appears twice is not mistaken for a cycle', async () => {
+  const h = createHarness();
+  const handling = h.bridge.handleMessage(execute('job-17'));
+  await flush();
+
+  const shared = { reused: true };
+  await h.executor.settle({ first: shared, second: shared, list: [1, 'two', null, false] });
+  await handling;
+
+  assert.equal(h.connection.sent[0].ok, true);
+  assert.deepEqual(h.connection.sent[0].data, {
+    first: { reused: true },
+    second: { reused: true },
+    list: [1, 'two', null, false],
+  });
 });

@@ -68,13 +68,23 @@ const bridge = createBridgeState({
   logger: console,
 });
 
+// Evaluated before the tab listeners can fire, so the initial binding is in
+// place as soon as the worker is up. The promise is kept so inbound frames can
+// wait for it (see the message handler).
+const workTabReady = workTab.refresh('worker-start');
+
 connection.setMessageHandler((data) => {
-  // `handleMessage` already absorbs everything, including malformed frames; the
-  // extra catch only makes sure a surprise can never surface as an unhandled
-  // rejection inside the worker.
-  void bridge.handleMessage(data).catch((error) => {
-    console.warn('[bridge] inbound message handling failed', error);
-  });
+  // The socket can open before the first Work Tab evaluation finishes, and a
+  // frame answered in that window would report NO_WORK_TAB for a profile that
+  // does have a Work Tab — with no later message to correct it. Waiting costs
+  // nothing once the evaluation is done.
+  void workTabReady
+    .then(() => bridge.handleMessage(data))
+    .catch((error) => {
+      // `handleMessage` already absorbs everything; this only guarantees a
+      // surprise can never surface as an unhandled rejection in the worker.
+      console.warn('[bridge] inbound message handling failed', error);
+    });
 });
 
 // Listeners are registered synchronously: a Manifest V3 worker must have them in
@@ -97,6 +107,3 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 void configSync.sync('worker-start');
-// Evaluated before the tab listeners can fire, so the initial binding is in
-// place as soon as the worker is up.
-void workTab.refresh('worker-start');

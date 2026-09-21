@@ -9,6 +9,7 @@ import {
   createResultError,
   createResultOk,
   createStatus,
+  isJsonCompatible,
   parseServiceMessage,
 } from '../src/lib/protocol.js';
 
@@ -157,4 +158,65 @@ test('STATUS carries exactly what its state needs', () => {
     reason: 'MULTIPLE_TABS',
   });
   assert.deepEqual(createStatus('RUNNING'), { type: 'STATUS', state: 'RUNNING' });
+});
+
+test('accepts exactly the JSON value types the architecture allows', () => {
+  const accepted = [
+    null,
+    true,
+    false,
+    0,
+    -1.5,
+    '',
+    'text',
+    [],
+    [1, 'two', null, { three: false }],
+    {},
+    { a: { b: [{ c: null }] } },
+  ];
+  for (const value of accepted) {
+    assert.equal(isJsonCompatible(value), true, `${JSON.stringify(value)} 应被接受`);
+  }
+});
+
+test('refuses values JSON.stringify would silently rewrite', () => {
+  // Each of these serializes without throwing, but the Service would receive
+  // something other than what the script returned.
+  const rejected = [
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['-Infinity', Number.NEGATIVE_INFINITY],
+    ['undefined', undefined],
+    ['a function', () => {}],
+    ['a symbol', Symbol('s')],
+    ['a bigint', 1n],
+    ['a Map', new Map()],
+    ['a Set', new Set()],
+    ['a Date', new Date(0)],
+    ['a RegExp', /x/],
+    ['a typed array', new Uint8Array(2)],
+    ['a nested undefined', { a: undefined }],
+    ['a nested function', { a: () => {} }],
+    ['an undefined in an array', [undefined]],
+  ];
+  for (const [label, value] of rejected) {
+    assert.equal(isJsonCompatible(value), false, `${label} 应被拒绝`);
+  }
+});
+
+test('detects cycles without rejecting a value that merely appears twice', () => {
+  const cyclic = { name: 'x' };
+  cyclic.self = cyclic;
+  assert.equal(isJsonCompatible(cyclic), false);
+  assert.equal(isJsonCompatible([cyclic]), false);
+
+  const shared = { reused: true };
+  assert.equal(isJsonCompatible({ a: shared, b: shared }), true);
+  assert.equal(isJsonCompatible([shared, shared]), true);
+});
+
+test('accepts a null-prototype object, which still serializes as a plain object', () => {
+  const bare = Object.create(null);
+  bare.a = 1;
+  assert.equal(isJsonCompatible(bare), true);
 });
