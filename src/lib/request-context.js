@@ -274,6 +274,19 @@ export function resolvePartitionKey(input) {
 
   if (input.topLevelSite === null) return { ok: true, partitionKey: null };
 
+  // A context describes a request the Work Tab could itself make, so the partition can
+  // only be that page's own top-level site. A supplied site that is *not* that site
+  // would combine a foreign partition's cookies with this page's Referer and user
+  // agent — a combination Chrome would never send — so it is refused rather than
+  // honoured. Comparing schemeful sites (not origins) matches what a partition key
+  // holds, and lets a caller name the site explicitly for clarity.
+  if (input.topLevelSite !== undefined && !isSameSite(input.topLevelSite, input.workTabUrl)) {
+    return {
+      ok: false,
+      reason: `topLevelSite 必须是 Work Tab 所在站点（${new URL(input.workTabUrl).origin}），不能指定其它站点的分区。`,
+    };
+  }
+
   const site = normalizeTopLevelSite(
     input.topLevelSite === undefined ? input.workTabUrl : input.topLevelSite,
   );

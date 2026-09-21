@@ -293,11 +293,17 @@ test('resolvePartitionKey always names exactly one partition', () => {
     { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
   );
 
-  // An explicit site replaces the Work Tab default.
+  // An explicit site is accepted when it **is** the Work Tab's own site (a caller can
+  // name it for clarity) …
   assert.deepEqual(
-    resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'https://other.test/x' }).partitionKey,
-    { topLevelSite: 'https://other.test', hasCrossSiteAncestor: true },
+    resolvePartitionKey({ targetUrl: 'https://app.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'https://app.test/other' }).partitionKey,
+    { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
   );
+  // … and refused when it is a foreign site: that would fetch a partition belonging to
+  // a page this Work Tab never was, and pair it with this page's Referer and UA.
+  const foreign = resolvePartitionKey({ targetUrl: 'https://app.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'https://bank.test' });
+  assert.equal(foreign.ok, false);
+  assert.match(foreign.reason, /Work Tab 所在站点/);
 
   assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: 'yes' }).ok, false);
   // The opt-out does not excuse a malformed bit: rejecting beats reinterpreting.
@@ -548,15 +554,26 @@ test('partitioned cookies are merged in, and an explicit null skips the partitio
   const named = await source.read({
     tabId: 1,
     targetUrl: `${WORK_TAB_ORIGIN}/media/1`,
-    topLevelSite: 'https://top.test/page',
+    topLevelSite: 'https://app.test/other-page',
   });
   assert.equal(named.ok, true);
-  // The target is cross-site relative to the named top-level site, so the derived
-  // bit is true — the same rule as the default, applied to the caller's site.
+  // The Work Tab's own site, so the partition is the same one the default would pick.
   assert.deepEqual(stub.calls.getAll.at(-1).partitionKey, {
-    topLevelSite: 'https://top.test',
-    hasCrossSiteAncestor: true,
+    topLevelSite: WORK_TAB_ORIGIN,
+    hasCrossSiteAncestor: false,
   });
+
+  // A foreign site is refused before any read: it would hand over a partition that
+  // belongs to a page this Work Tab never was.
+  const readsBefore = stub.calls.getAll.length;
+  const foreign = await source.read({
+    tabId: 1,
+    targetUrl: `${WORK_TAB_ORIGIN}/media/1`,
+    topLevelSite: 'https://bank.test',
+  });
+  assert.equal(foreign.ok, false);
+  assert.equal(foreign.code, CONTEXT_ERROR_CODES.INVALID_PARTITION);
+  assert.equal(stub.calls.getAll.length, readsBefore);
 
   // A cross-site target keeps its own (cross-site) partition: deriving the bit from
   // the two sites is what makes this land in the partition Chrome uses.

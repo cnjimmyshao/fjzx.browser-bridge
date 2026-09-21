@@ -225,7 +225,7 @@ cookie: sid=…; theme=…; strict=…
 | `requestId` | 是 | 与 `jobId` 平行的一次性请求身份；Bridge 原样回显。缺失 → 静默丢弃（没有身份可回答） |
 | `targetUrl` | 是 | **原样含签名参数**、不含 fragment、http(s)、不得内嵌凭据；否则 `INVALID_TARGET_URL` |
 | `scope` | 否 | `WORK_TAB_ORIGIN`（默认，要求与 Work Tab 同源）或 `TARGET_ONLY`（显式允许跨源，但返回集合仍只含匹配该 URL 的 cookie）；其他值 → `INVALID_SCOPE`（不做静默降级） |
-| `topLevelSite` | 否 | CHIPS 分区键的站点部分。**不传时默认取 Work Tab 的 origin**（子资源的分区由顶层站点决定）；传 `null` 表示明确不要分区查询；传非法 URL → `INVALID_PARTITION` |
+| `topLevelSite` | 否 | CHIPS 分区键的站点部分。**不传时默认取 Work Tab 的 origin**（子资源的分区由顶层站点决定）；传 `null` 表示明确不要分区查询；**只能传 Work Tab 所在站点**（按 schemeful site 比较，可显式点名以求清晰），传别的站点 → `INVALID_PARTITION`——否则会把"这个页面从未处于其下"的分区 cookie 与当前页面的 Referer/UA 拼在一起，那是 Chrome 永远不会发出的组合 |
 | `hasCrossSiteAncestor` | 否 | CHIPS 分区键的**另一位**（Chrome 130+，见下）。**只给 `topLevelSite` 会同时命中两种取值**：若两个分区都有同名 cookie，就会一起返回、甚至拼出错误的 `Cookie` 头。它表示"这次请求相对顶层站点是否跨站"，因此默认按两个 **schemeful site**（scheme + 可注册域，忽略端口）推导：同站（含 sibling 子域、不同端口）→ `false`，跨站 → `true`。Bridge 不携带公共后缀表，"可注册域"用"末两段标签"近似，对多段公共后缀（如 `a.co.uk`）会判错——这类情况请**显式**传值；显式值永远优先。非 boolean → `INVALID_PARTITION` |
 
 ### 8.2 响应：`REQUEST_CONTEXT`
