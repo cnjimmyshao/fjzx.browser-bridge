@@ -235,3 +235,31 @@ test('refuses arrays whose holes or stray properties JSON would change', () => {
   assert.equal(isJsonCompatible([1, 2, 3]), true);
   assert.equal(isJsonCompatible([]), true);
 });
+
+test('refuses object properties JSON would drop', () => {
+  const symbolKeyed = { [Symbol('value')]: 1 };
+  assert.equal(isJsonCompatible(symbolKeyed), false, 'symbol key 会被 JSON 直接丢弃');
+  assert.equal(isJsonCompatible({ visible: 1, [Symbol('x')]: 2 }), false);
+
+  const hidden = {};
+  Object.defineProperty(hidden, 'a', { value: 1, enumerable: false });
+  assert.equal(isJsonCompatible(hidden), false, '不可枚举属性同样会被丢弃');
+
+  assert.equal(isJsonCompatible({ a: 1, b: 'two' }), true);
+});
+
+test('is total: a property that throws while being read is a rejection, not a crash', () => {
+  const explosive = {
+    get boom() {
+      throw new Error('getter exploded');
+    },
+  };
+  assert.doesNotThrow(() => isJsonCompatible(explosive));
+  assert.equal(isJsonCompatible(explosive), false);
+
+  const nested = { ok: 1, deeper: { get alsoBoom() { throw new Error('nested'); } } };
+  assert.equal(isJsonCompatible(nested), false);
+
+  const explosiveArray = [{ get boom() { throw new Error('in array'); } }];
+  assert.equal(isJsonCompatible(explosiveArray), false);
+});

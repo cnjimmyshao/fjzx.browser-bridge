@@ -146,18 +146,36 @@ export function createResultError(jobId, code, message) {
  * Is this value something the wire format can carry without changing it?
  *
  * `JSON.stringify` succeeding is not the same test: it quietly turns `NaN` and
- * `Infinity` into `null`, drops `undefined` and function-valued properties, and
- * flattens a `Map` to `{}`. Emitting `ok: true` with data the script never
- * returned would be worse than reporting a failure, so the supported types are
- * checked explicitly against what the architecture allows: null, boolean,
- * number, string, array and plain object.
+ * `Infinity` into `null`, drops `undefined`, function-valued, symbol-keyed and
+ * non-enumerable properties, flattens a `Map` to `{}` and fills array holes with
+ * `null`. Emitting `ok: true` with data the script never returned would be worse
+ * than reporting a failure, so the supported types are checked explicitly
+ * against what the architecture allows: null, boolean, number, string, array and
+ * plain object.
+ *
+ * Total by construction: reading a property can run a getter that throws, and a
+ * predicate that throws would escape as an unhandled failure instead of a
+ * verdict.
  *
  * @param {unknown} value
- * @param {Set<object>} [path] objects on the current branch, to detect cycles
- *   without rejecting a value that merely appears twice
  * @returns {boolean}
  */
-export function isJsonCompatible(value, path = new Set()) {
+export function isJsonCompatible(value) {
+  try {
+    return checkJsonCompatible(value, new Set());
+  } catch {
+    // A value whose contents cannot even be inspected is not one Bridge can
+    // promise to deliver unchanged.
+    return false;
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @param {Set<object>} path objects on the current branch, to detect cycles
+ *   without rejecting a value that merely appears twice
+ */
+function checkJsonCompatible(value, path) {
   if (value === null) return true;
 
   switch (typeof value) {
@@ -178,18 +196,27 @@ export function isJsonCompatible(value, path = new Set()) {
   path.add(value);
   try {
     if (Array.isArray(value)) {
-      // A hole is skipped by `every` and a stray property is dropped entirely,
-      // yet both change the value: `new Array(1)` leaves as `[null]`.
+      // `every` skips holes, yet they leave as null, and a stray property is
+      // dropped entirely.
       if (value.length !== Object.keys(value).length) return false;
-      return value.every((item) => isJsonCompatible(item, path));
+      return value.every((item) => checkJsonCompatible(item, path));
     }
+
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) {
       // Date, Map, Set, RegExp, typed arrays: all of them change shape on the way
       // out, so none of them is "the value the script returned".
       return false;
     }
-    return Object.values(value).every((item) => isJsonCompatible(item, path));
+
+    // JSON keeps only own enumerable string-keyed properties, so anything else
+    // would be dropped without the Service being able to tell.
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') return false;
+      if (!Object.prototype.propertyIsEnumerable.call(value, key)) return false;
+      if (!checkJsonCompatible(value[key], path)) return false;
+    }
+    return true;
   } finally {
     path.delete(value);
   }

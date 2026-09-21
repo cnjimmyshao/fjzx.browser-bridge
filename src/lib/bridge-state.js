@@ -138,27 +138,33 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
       announceState();
     };
 
-    let data;
     try {
-      data = await executor.execute({ tabId: job.tabId, script: job.script, input: job.input });
+      let data;
+      try {
+        data = await executor.execute({ tabId: job.tabId, script: job.script, input: job.input });
+      } catch (error) {
+        fail(describeError(error));
+        return;
+      }
+
+      // A missing return value has an obvious JSON spelling, so it maps to null;
+      // anything else must survive the trip unchanged.
+      const result = data === undefined ? null : data;
+      if (!isJsonCompatible(result)) {
+        fail(
+          '返回值不是 JSON-compatible（只支持 null/boolean/有限 number/string/array/plain object），拒绝静默改写后返回。',
+        );
+        return;
+      }
+
+      currentJob = null;
+      sendResultFor(job, createResultOk(job.jobId, result));
+      announceState();
     } catch (error) {
-      fail(describeError(error));
-      return;
+      // Nothing may leave the Job registered: a stuck RUNNING state would answer
+      // every later EXECUTE with BUSY and never deliver this one's RESULT.
+      fail(`处理返回值时出现意外错误：${describeError(error)}`);
     }
-
-    // A missing return value has an obvious JSON spelling, so it maps to null;
-    // anything else must survive the trip unchanged.
-    const result = data === undefined ? null : data;
-    if (!isJsonCompatible(result)) {
-      fail(
-        '返回值不是 JSON-compatible（只支持 null/boolean/有限 number/string/array/plain object），拒绝静默改写后返回。',
-      );
-      return;
-    }
-
-    currentJob = null;
-    sendResultFor(job, createResultOk(job.jobId, result));
-    announceState();
   }
 
   /**

@@ -328,10 +328,12 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
       // have been changed synchronously by the event that triggered this refresh.
       publish(trigger);
       persist();
-      // Readiness is settled even on failure: blocking a caller forever on a
-      // query that cannot succeed is worse than answering from the last known
-      // state, which the next tab event will correct.
-      settleReady();
+      // Readiness is settled only by the newest attempt. A superseded query's
+      // failure says nothing about the newer evaluation still in flight, and
+      // releasing early would let a frame answer from the unevaluated defaults.
+      // Settling on the newest failure keeps a caller from blocking forever on a
+      // query that cannot succeed.
+      if (revision === queryRevision) settleReady();
       return;
     }
 

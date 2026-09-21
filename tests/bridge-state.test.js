@@ -411,6 +411,41 @@ test('a Job that resolves with undefined still produces a JSON-compatible RESULT
   ]);
 });
 
+test('a value whose inspection throws fails the Job instead of stranding it', async () => {
+  const h = createHarness();
+  const handling = h.bridge.handleMessage(execute('job-20'));
+  await flush();
+
+  // A plain object with an enumerable throwing getter: reading it during
+  // validation raises, and a Job left registered would answer every later
+  // EXECUTE with BUSY forever.
+  const explosive = {
+    get boom() {
+      throw new Error('getter exploded');
+    },
+  };
+  await h.executor.settle(explosive);
+  await handling;
+
+  assert.equal(h.connection.sent[0].ok, false);
+  assert.equal(h.connection.sent[0].error.code, ERROR_CODES.SCRIPT_EXECUTION_FAILED);
+  assert.equal(h.bridge.state, BRIDGE_STATES.IDLE, 'Bridge 不得滞留在 RUNNING');
+  assert.equal(h.bridge.currentJobId, null);
+
+  // And a later Job still gets through.
+  const next = h.bridge.handleMessage(execute('job-21'));
+  await flush();
+  await h.executor.settle('fine');
+  await next;
+
+  assert.deepEqual(h.connection.sent.at(-1), {
+    type: 'RESULT',
+    jobId: 'job-21',
+    ok: true,
+    data: 'fine',
+  });
+});
+
 test('a RESULT is not delivered to a Service that did not submit the Job', async () => {
   const h = createHarness();
   const handling = h.bridge.handleMessage(execute('job-13'));
