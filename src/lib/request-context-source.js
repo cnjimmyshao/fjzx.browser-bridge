@@ -226,7 +226,10 @@ export function createRequestContextSource(options = {}) {
       });
       const value = results?.[0]?.result;
       if (value && typeof value.userAgent === 'string' && value.userAgent !== '') {
-        return { ok: true, facts: value };
+        // `documentId` names the document the facts came from. A reload keeps the URL
+        // identical, so it is the only way to notice that the page was replaced while
+        // the cookie queries were in flight.
+        return { ok: true, facts: { ...value, documentId: results[0].documentId ?? null } };
       }
       return { ok: false, reason: '页面没有返回可用的信息。' };
     } catch (error) {
@@ -286,6 +289,12 @@ export function createRequestContextSource(options = {}) {
     }
     const storeFilter = store.storeId === undefined ? {} : { storeId: store.storeId };
 
+    // The document is identified *before* the cookie reads, so a reload that keeps the
+    // URL identical is still visible afterwards: a page that rotates its session
+    // cookie while loading would otherwise yield an immediately stale context.
+    const factsBefore = await readPageFacts(request.tabId);
+    if (!factsBefore.ok) return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `无法读取 Work Tab 页面：${factsBefore.reason}`);
+
     let unpartitioned;
     let partitioned = [];
     try {
@@ -318,10 +327,13 @@ export function createRequestContextSource(options = {}) {
     const pageFacts = facts.facts;
 
     // The *document* the facts came from must be the document the cookies were read
-    // for. Comparing origins alone would accept a same-origin navigation
-    // (`/feed` → `/account`) and then answer with the old URL as the suggested
-    // Referer while the facts describe the new page. A mismatch is not an error the
-    // Service can act on — it is a race — so the caller retries once.
+    // for. URLs alone are not enough: a reload keeps the URL and swaps the document,
+    // and comparing only origins would even accept a same-origin navigation
+    // (`/feed` → `/account`). Either way the answer would mix one document's cookies
+    // and Referer with another's page facts, so the read starts over — once.
+    if (factsBefore.facts.documentId !== null && pageFacts.documentId !== null) {
+      if (factsBefore.facts.documentId !== pageFacts.documentId) return { retry: true };
+    }
     const factsPage = normalizeTargetUrl(pageFacts.pageUrl);
     if (factsPage.ok && factsPage.url !== workTab.url) return { retry: true };
     const after = await readWorkTabUrl(request.tabId);

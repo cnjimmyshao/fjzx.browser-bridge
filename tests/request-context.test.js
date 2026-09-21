@@ -401,6 +401,7 @@ function createStubChrome({
   tabUrl = WORK_TAB_URL,
   tabUrls = null,
   pageFacts = { userAgent: 'PageUA/1.0', documentReferrer: '', referrerPolicy: null, pageUrl: WORK_TAB_URL },
+  documentIds = null,
   failCookies = false,
   failScripting = false,
   tabMissing = false,
@@ -444,10 +445,12 @@ function createStubChrome({
         calls.executeScript.push(details);
         if (failScripting) throw new Error('cannot script this page');
         // `pageFacts` may be one object or one per read, so a test can make the
-        // page and the tab disagree on the first attempt only.
+        // page and the tab disagree on the first attempt only. `documentIds` names the
+        // document each read came from, which is how a same-URL reload is noticed.
         const facts = Array.isArray(pageFacts) ? pageFacts[Math.min(factReads, pageFacts.length - 1)] : pageFacts;
+        const documentId = documentIds === null ? undefined : documentIds[Math.min(factReads, documentIds.length - 1)];
         factReads += 1;
-        return [{ result: facts }];
+        return [{ result: facts, ...(documentId === undefined ? {} : { documentId }) }];
       },
     },
   };
@@ -830,6 +833,40 @@ test('a coverage change during the reads is refused, not answered with a stale c
   assert.match(refused.message, /访问权限在采样期间发生了变化/);
   // 第一次问整块授权、第二次复核它，第三次确认目标 origin 仍然可见。
   assert.deepEqual(stub.calls.contains, [['<all_urls>'], ['<all_urls>'], ['https://app.test/*']]);
+});
+
+test('a reload that keeps the URL is detected by document identity', async () => {
+  // Attempt 1: the document is swapped between the two reads while the URL stays the
+  // same, so the cookie set and the page facts describe different documents. Attempt 2
+  // reads a settled document and answers from it.
+  const reloaded = createStubChrome({
+    documentIds: ['doc-1', 'doc-2', 'doc-2', 'doc-2'],
+    pageFacts: { userAgent: 'ReloadedUA/1.0', documentReferrer: '', referrerPolicy: null, pageUrl: WORK_TAB_URL },
+    cookies: [{ name: 'sid', value: 'rotated', path: '/' }],
+  });
+  const outcome = await createSource(reloaded).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.equal(outcome.context.userAgent, 'ReloadedUA/1.0');
+  // Two reads per attempt: one to identify the document, one after the cookies.
+  assert.equal(reloaded.calls.executeScript.length, 4);
+
+  // A page that reloads on every read never yields a consistent sample.
+  const alwaysReloading = createStubChrome({
+    documentIds: ['doc-1', 'doc-2', 'doc-3', 'doc-4'],
+    cookies: [{ name: 'sid', value: 'rotated', path: '/' }],
+  });
+  const refused = await createSource(alwaysReloading).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+  assert.match(refused.message, /导航/);
+
+  // Browsers that do not report a document id keep the URL-only guard.
+  const noDocumentId = createStubChrome({ cookies: [{ name: 'sid', value: 's', path: '/' }] });
+  const fallback = await createSource(noDocumentId).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  assert.equal(fallback.ok, true);
+  // One identifying read plus one after the cookies.
+  assert.equal(noDocumentId.calls.executeScript.length, 2);
 });
 
 test('originMatchPattern drops the port, which match patterns do not support', () => {

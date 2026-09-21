@@ -332,6 +332,7 @@ cookie: sid=…; theme=…; strict=…
 9. **只有跨查询的正常名并列无法复现顺序**：两次 `getAll`（非分区 + 分区）合并时，响应之间的相对顺序丢失；同一次响应内部保持 API 顺序（= 浏览器发送顺序），path 长度不同时顺序也确定。实现只对真正有歧义的那种情况报 `duplicateCookieNames`，不做无谓告警。
 10. **页面读不到就是失败，不会降级**：若用户限制了扩展对该站点的访问，`chrome.scripting` 会拒绝执行——而此时 `chrome.cookies` 也在静默过滤，所以实现直接返回 `CONTEXT_FAILED`，而不是回退到 worker 自己的 UA 交出一份"看起来完整"的上下文。
 11. **采样期间绑定变化会被拦下**：读取是异步的，期间出现第二个普通 Tab 会让 Bridge 变成 `MULTIPLE_TABS`；实现会先等 Work Tab 的当前快照（`settled()`）再复验绑定，变化时返回 `NOT_READY`，而不是继续披露按旧绑定采到的上下文。
+12. **"同一个文档"而不是"同一个 URL"**：整页重载会保留 URL 却换掉文档，若页面在加载时轮换会话 cookie，仅比较 URL 会给出一个立刻过期的上下文。实现用 `chrome.scripting` 注入结果里的 `documentId` 在**读取 cookie 前后各标识一次文档**，不一致就重试一次，仍不一致则 `CONTEXT_FAILED`；浏览器不返回 `documentId` 时退回 URL 比较。
 12. **隐身窗口要走对的 cookie store**：扩展在隐身模式下启用时，隐身 Tab 有自己的 store；不传 `storeId` 的 `getAll` 会读到普通 profile 的 store（既漏掉隐身会话，又可能把普通 profile 的 cookie 交出去）。实现用 `getAllCookieStores()` 按 `tabId` 解析 store 并显式传入；没有任何 store 认领该 Tab 时退回默认 store（不猜）。
 13. **Chrome < 130 要降级而不是报错**：`hasCrossSiteAncestor` 是 Chrome 130 才有的字段，旧版上带上它会让每次读取都失败（包括没有分区 cookie 的目标）。实现按版本降级为"只按顶层站点取分区"，并在响应里用 `exactPartitionSelection: false` 明说；manifest 不为这个实验能力抬高 V1 的版本底线。
 14. **需求侧证据显示当前用不上 Cookie**（[04](notes/04-service-side-need.md)）：`pr-douyin` 不发 Cookie 也能下四类媒体；`media_fetch_http_403`（9/416）的成因未知。**在拿到真实失败复现之前，扩大权限面的收益无法证明。**
