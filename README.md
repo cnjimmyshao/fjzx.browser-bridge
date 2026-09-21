@@ -46,10 +46,29 @@ Bridge 当前状态：
 1. ✅ Extension Settings 保存 Service URL；
 2. ✅ WebSocket 连接 Service；
 3. ✅ 自动识别唯一 Work Tab；
-4. 接收 EXECUTE；
+4. ✅ 接收 EXECUTE；
 5. 使用 `chrome.userScripts.execute()` 在 USER_SCRIPT world 执行 JavaScript；
-6. 主动 Push RESULT；
-7. 支持 GET_STATUS / STATUS。
+6. ✅ 主动 Push RESULT（协议已通；执行本身仍是 stub，见 #6）；
+7. ✅ 支持 GET_STATUS / STATUS。
+
+## 协议与状态
+
+协议只有四种消息、三个 error code，与 `docs/architecture-v1.md` 完全一致，**没有独立 ERROR / ACK / Heartbeat / GET_RESULT**：
+
+| 方向 | 消息 |
+| --- | --- |
+| Service → Bridge | `EXECUTE`、`GET_STATUS` |
+| Bridge → Service | `RESULT`、`STATUS` |
+
+- `EXECUTE` 必填 `jobId`（非空字符串）与 `script`（字符串）；`input` / `metadata` 可选且**原样带过、从不解释**。
+- `RESULT` 为 `ok:true/data` 或 `ok:false/error`，`jobId` 与请求完全一致；error code 只有 `BUSY` / `NOT_READY` / `SCRIPT_EXECUTION_FAILED`。
+- `STATUS` 按状态带最少字段：`IDLE` 只有 state，`RUNNING` 附 `jobId`，`NOT_READY` 附 `reason`。
+
+Bridge 状态只有 `IDLE` / `RUNNING` / `NOT_READY`，而且是**推导出来的、不是存下来的**：有 Job 在跑就是 `RUNNING`，否则没有 Work Tab 就是 `NOT_READY`，否则 `IDLE`。这样三个状态不会互相漂移，Work Tab 消失也会自动反映在下一次 `GET_STATUS` 上。
+
+一个 Bridge 同时只跑一个 Job：`RUNNING` 期间再来的 `EXECUTE` 立刻回 `BUSY`，**不排队、不抢占**，第一个 Job 完全不受影响。没有 Queue、History、Retry、幂等或 exactly-once；Job 结束后不保留任何结果。
+
+无法解析的帧不会打断连接：JSON 非法或没有可用 `jobId` 时只记录并忽略（V1 没有 ERROR 消息可用）；若失败帧仍带有可用 `jobId`，则用 `SCRIPT_EXECUTION_FAILED` 回一个 `RESULT`，免得 Service 一直空等。
 
 ## 仓库结构
 

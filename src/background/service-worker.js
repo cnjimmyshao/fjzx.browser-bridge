@@ -1,3 +1,5 @@
+import { createBridgeState } from '../lib/bridge-state.js';
+import { createExecutorStub } from '../lib/executor-stub.js';
 import { createServiceConfigSync } from '../lib/service-config.js';
 import { createServiceConnection } from '../lib/service-connection.js';
 import { createSettingsStore } from '../lib/settings-store.js';
@@ -5,12 +7,11 @@ import { SERVICE_URL_STORAGE_KEY } from '../lib/service-url.js';
 import { createWorkTabManager } from '../lib/work-tab.js';
 
 /**
- * V1.2/V1.3 service worker: maintain the single Service WebSocket and bind the
- * single Work Tab.
+ * V1.2-V1.4 service worker: keep the Service WebSocket, bind the Work Tab, and
+ * run the one Job the Service hands over.
  *
- * V1.3 only tracks *which* tab is the Work Tab, and why none is bound when none
- * is. It executes nothing: the Job protocol and USER_SCRIPT execution arrive in
- * later issues.
+ * Execution is still a stub: V1.4 defines the protocol and the state machine, and
+ * the next issue replaces only the executor.
  *
  * Note that a Manifest V3 worker is not persistent: Chrome may terminate it when
  * idle, which also drops the socket. Every wake-up re-runs this module and
@@ -21,15 +22,6 @@ import { createWorkTabManager } from '../lib/work-tab.js';
 const store = createSettingsStore(chrome.storage.local);
 
 const connection = createServiceConnection({ logger: console });
-
-connection.setMessageHandler((data) => {
-  // V1.3 implements no protocol yet. Anything that arrives is deliberately
-  // ignored, so unknown text or malformed JSON can never break the Bridge.
-  console.debug(
-    '[bridge] service message ignored: V1.3 implements no protocol',
-    typeof data === 'string' ? data.slice(0, 120) : typeof data,
-  );
-});
 
 const configSync = createServiceConfigSync({
   readServiceUrl: () => store.readServiceUrl(),
@@ -63,11 +55,26 @@ function createWorkTabBinding() {
   };
 }
 
-// Exposed for later issues; V1.3 only keeps it current and logs transitions.
 const workTab = createWorkTabManager({
   tabs: chrome.tabs,
   binding: createWorkTabBinding(),
   logger: console,
+});
+
+const bridge = createBridgeState({
+  connection,
+  workTab,
+  executor: createExecutorStub(),
+  logger: console,
+});
+
+connection.setMessageHandler((data) => {
+  // `handleMessage` already absorbs everything, including malformed frames; the
+  // extra catch only makes sure a surprise can never surface as an unhandled
+  // rejection inside the worker.
+  void bridge.handleMessage(data).catch((error) => {
+    console.warn('[bridge] inbound message handling failed', error);
+  });
 });
 
 // Listeners are registered synchronously: a Manifest V3 worker must have them in
