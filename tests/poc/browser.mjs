@@ -180,6 +180,17 @@ export async function launchBrowser(options) {
     headless = true,
   } = options;
 
+  // Refuse to reuse a port something else already owns. The readiness probe below
+  // only asks "is there a debugging endpoint here?", so an unrelated browser on the
+  // same port — the default 9222 makes this easy — would be adopted silently: the
+  // POC would then close that session's tabs while cleanup killed a different PID.
+  if (await isEndpointAlive(port)) {
+    throw new Error(
+      `调试端口 ${port} 上已经有另一个浏览器在监听，它不属于本次 POC。` +
+        '请用 --port 换一个端口，或先关掉那个浏览器。',
+    );
+  }
+
   rmSync(profile, { recursive: true, force: true });
   mkdirSync(profile, { recursive: true });
 
@@ -202,15 +213,46 @@ export async function launchBrowser(options) {
 
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
+    let version = null;
     try {
       const response = await fetch(`http://127.0.0.1:${port}/json/version`);
-      const version = await response.json();
-      return { port, profile, pid: child.pid, browser: version.Browser };
+      version = await response.json();
     } catch {
-      await sleep(250);
+      version = null; // not up yet
     }
+
+    if (version) {
+      // Chrome hands off to an instance already using this profile and exits, so a
+      // dead child means this endpoint is somebody else's.
+      if (child.exitCode !== null) {
+        throw new Error(
+          `浏览器进程已退出（退出码 ${child.exitCode}），端口 ${port} 上的端点不属于本次 POC。`,
+        );
+      }
+      return { port, profile, pid: child.pid, browser: version.Browser };
+    }
+
+    await sleep(250);
+  }
+
+  // Nothing answered in time. The child is detached and was never returned to the
+  // caller, so the caller's cleanup cannot reach it: it has to die here.
+  try {
+    process.kill(child.pid);
+  } catch {
+    // already gone
   }
   throw new Error(`浏览器调试端口 ${port} 在 30s 内没有就绪`);
+}
+
+/** @param {number} port */
+async function isEndpointAlive(port) {
+  try {
+    await fetch(`http://127.0.0.1:${port}/json/version`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** @param {number} port @param {string} name */

@@ -104,16 +104,23 @@ export async function startTestService(options = {}) {
     bridgeCount: () => server.totalAccepted(),
     openCount: () => server.openCount(),
 
-    /** Resolves once a Bridge has connected (or immediately if one already has). */
+    /**
+     * Resolves once a Bridge has connected (or immediately if one already has).
+     *
+     * The deadline is checked inside the loop rather than by racing the loop
+     * against a timer: a losing `Promise.race` leaves the loop scheduling 25ms
+     * timers forever, and a pending timer is enough to keep Node alive, so a Bridge
+     * that never connects would hang the run instead of reporting the timeout.
+     */
     waitForBridge(timeoutMs = 15000) {
       if (server.totalAccepted() > 0 && server.openCount() > 0) return Promise.resolve();
-      return withTimeout(
-        (async () => {
-          while (server.openCount() === 0) await new Promise((r) => setTimeout(r, 25));
-        })(),
-        timeoutMs,
-        '等待 Bridge 连接超时',
-      );
+      const deadline = Date.now() + timeoutMs;
+      return (async () => {
+        while (server.openCount() === 0) {
+          if (Date.now() >= deadline) throw new Error('等待 Bridge 连接超时');
+          await new Promise((r) => setTimeout(r, 25));
+        }
+      })();
     },
 
     /** Sends GET_STATUS and returns the STATUS that answers it. */
