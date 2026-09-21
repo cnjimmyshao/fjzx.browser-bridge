@@ -111,10 +111,16 @@ export function createWorkTabTracker(options = {}) {
      * Navigation inside the bound tab needs no special case: the tab is still the
      * single candidate, so the same tabId is bound again.
      *
-     * @param {Array<{id: number, url?: string}>} tabs
+     * @param {Array<{id: number, url?: string}>} tabs every tab, not only candidates
      */
     applyTabs(tabs) {
-      const candidates = (Array.isArray(tabs) ? tabs : []).filter(isCandidateTab);
+      const all = (Array.isArray(tabs) ? tabs : []).filter(
+        (tab) => tab && typeof tab.id === 'number',
+      );
+      const candidates = all.filter(isCandidateTab);
+      const remembered = lastBoundTabId;
+      const rememberedStillPresent =
+        remembered !== null && all.some((tab) => tab.id === remembered);
 
       if (candidates.length === 1) {
         bind(candidates[0].id);
@@ -122,6 +128,16 @@ export function createWorkTabTracker(options = {}) {
       }
 
       tabId = null;
+
+      // A tab that has left the profile entirely is a closure. Deriving this from
+      // the list rather than from matching a removal event makes it independent of
+      // event ordering — including the wake-up that Chrome performs to deliver
+      // the removal — and it distinguishes a closure from a tab that merely
+      // navigated away, which is still present but no longer an ordinary page.
+      if (remembered !== null && !rememberedStillPresent) {
+        boundTabWasClosed = true;
+      }
+      lastBoundTabId = null;
 
       if (candidates.length === 0) {
         reason = boundTabWasClosed
@@ -136,6 +152,9 @@ export function createWorkTabTracker(options = {}) {
     /**
      * Record that a tab went away. Closing an unrelated tab changes nothing;
      * closing the tab we bound — now or in an earlier worker lifetime — does.
+     *
+     * This matters even though `applyTabs` can derive the same conclusion, because
+     * the removal must survive a follow-up query that fails.
      *
      * @param {number} removedTabId
      */
@@ -252,8 +271,11 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
     } catch (error) {
       logger.warn?.('[bridge] failed to list tabs', error);
       // The tracker may already have changed — a tab removal is recorded before
-      // this query runs — so the current state is published either way.
+      // this query runs — so the current state is published either way, and
+      // persisted too: leaving the previous binding on record would make a later
+      // wake-up report NO_WORK_TAB and lose the closure entirely.
       publish(trigger);
+      persist();
       return;
     }
 

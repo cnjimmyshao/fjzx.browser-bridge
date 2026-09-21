@@ -374,6 +374,59 @@ test('the binding is persisted after each evaluation', async () => {
   assert.deepEqual(binding.writes.at(-1), { tabId: 4, boundTabWasClosed: false });
 });
 
+test('a tab that navigated away and is then closed is not a Work Tab closure', async () => {
+  const fake = createFakeTabs([web(8, 'https://a.test/')]);
+  const manager = createWorkTabManager({ tabs: fake.api });
+
+  await manager.refresh('worker-start');
+  assert.equal(manager.tabId, 8);
+
+  // The bound tab leaves the web, so the binding is released while the tab itself
+  // is still there.
+  await fake.navigate(8, 'chrome://settings/');
+  assert.equal(manager.tabId, null);
+  assert.equal(manager.reason, WORK_TAB_REASONS.NO_WORK_TAB);
+
+  // Closing that browser page later must not be reported as the Work Tab being
+  // closed: Bridge had already stopped driving it.
+  await fake.removeTab(8);
+  assert.equal(manager.reason, WORK_TAB_REASONS.NO_WORK_TAB);
+});
+
+test('a closure is derived from the tab list, without depending on event order', async () => {
+  // The worker wakes because the Work Tab was closed; the removal event and the
+  // initial refresh race, and the outcome must not depend on who wins.
+  const fake = createFakeTabs([]);
+  const binding = createMemoryBinding({ tabId: 5, boundTabWasClosed: false });
+  const manager = createWorkTabManager({ tabs: fake.api, binding });
+
+  await manager.refresh('worker-start');
+
+  assert.equal(
+    manager.reason,
+    WORK_TAB_REASONS.WORK_TAB_CLOSED,
+    '仅凭「记住的 Tab 已不在列表中」也应判定为关闭',
+  );
+});
+
+test('a failed follow-up query still persists the closure', async () => {
+  const fake = createFakeTabs([web(5)]);
+  const binding = createMemoryBinding(null);
+  const manager = createWorkTabManager({ tabs: fake.api, binding });
+
+  await manager.refresh('worker-start');
+  fake.failQueries();
+  await fake.removeTab(5);
+  await settle();
+
+  assert.equal(manager.reason, WORK_TAB_REASONS.WORK_TAB_CLOSED);
+  assert.deepEqual(
+    binding.writes.at(-1),
+    { tabId: null, boundTabWasClosed: true },
+    '查询失败也不能让 storage.session 留在旧的已绑定状态',
+  );
+});
+
 test('a failing binding read or write never breaks the manager', async () => {
   const fake = createFakeTabs([web(6)]);
   const warnings = [];
