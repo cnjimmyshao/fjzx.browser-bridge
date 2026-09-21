@@ -204,6 +204,34 @@ export async function evaluate(port, targetId, expression) {
 }
 
 /**
+ * Override the user agent for one page target only.
+ *
+ * The request-context POC needs this to prove *which* navigator an answer follows:
+ * a page-level override changes what the page reports while the extension service
+ * worker keeps the browser's own value, so a context sampled in the worker would
+ * be wrong. Nothing else in the harness needs a raw CDP call.
+ *
+ * The override belongs to the CDP *session* that set it — closing the connection
+ * reverts the page — so this returns a handle the caller closes when it is done.
+ *
+ * @param {number} port @param {string} targetId @param {string} userAgent
+ * @returns {Promise<{close: () => void}>}
+ */
+export async function setUserAgentOverride(port, targetId, userAgent) {
+  const target = (await listTargets(port)).find((candidate) => candidate.id === targetId);
+  if (!target) throw new Error(`找不到目标 ${targetId}`);
+
+  const client = await connect(target.webSocketDebuggerUrl);
+  try {
+    await client.send('Network.setUserAgentOverride', { userAgent });
+  } catch (error) {
+    client.close();
+    throw error;
+  }
+  return { close: () => client.close() };
+}
+
+/**
  * Open a page and return *that* page's target id.
  *
  * `/json/new` answers with the target it created, so the id is taken from the

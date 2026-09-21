@@ -1,6 +1,9 @@
 /**
- * Request-context POC logic, kept free of `chrome.*` so `node --test` can drive
- * every decision without a browser.
+ * Request context: what a Service needs to replay one request for a target URL.
+ *
+ * Kept free of `chrome.*` so `node --test` can drive every decision without a
+ * browser; `request-context-source.js` is the thin, injectable layer that talks
+ * to the browser APIs.
  *
  * The question this module answers is narrow on purpose: given a *target URL*
  * and the cookie objects the browser reports for exactly that URL, what is the
@@ -28,16 +31,21 @@ export const TARGET_SCOPES = Object.freeze({
   /**
    * Explicit opt-in: any http(s) target is accepted, and the disclosed set is
    * still only what the browser would send to *that* URL — never the whole jar.
-   * Needed for cross-origin media hosts; see the report's security section for
-   * why it is not the default.
+   * Needed for cross-origin media hosts; the report explains why it is not the
+   * default.
    */
   TARGET_ONLY: 'TARGET_ONLY',
 });
 
-/** POC-only error codes, modelled on V1's small `RESULT.error.code` vocabulary. */
+/**
+ * The error codes a context request can answer with. Separate from V1's
+ * `ERROR_CODES` on purpose: that set belongs to a Job's RESULT, and widening it
+ * would change what a Service has to handle for EXECUTE.
+ */
 export const CONTEXT_ERROR_CODES = Object.freeze({
   NOT_READY: 'NOT_READY',
   INVALID_TARGET_URL: 'INVALID_TARGET_URL',
+  INVALID_SCOPE: 'INVALID_SCOPE',
   TARGET_OUT_OF_SCOPE: 'TARGET_OUT_OF_SCOPE',
   CONTEXT_FAILED: 'CONTEXT_FAILED',
 });
@@ -76,6 +84,26 @@ export function normalizeTargetUrl(raw) {
 
   parsed.hash = '';
   return { ok: true, url: parsed.toString() };
+}
+
+/**
+ * Resolve the requested scope, defaulting to the strict one.
+ *
+ * An unknown scope is refused rather than coerced: quietly treating `"ANY"` as
+ * `WORK_TAB_ORIGIN` would hand the Service a different answer than it asked for.
+ *
+ * @param {unknown} raw
+ * @returns {{ok: true, scope: string} | {ok: false, reason: string}}
+ */
+export function normalizeScope(raw) {
+  if (raw === undefined || raw === null) return { ok: true, scope: TARGET_SCOPES.WORK_TAB_ORIGIN };
+  if (raw === TARGET_SCOPES.WORK_TAB_ORIGIN || raw === TARGET_SCOPES.TARGET_ONLY) {
+    return { ok: true, scope: raw };
+  }
+  return {
+    ok: false,
+    reason: `scope 只能是 ${TARGET_SCOPES.WORK_TAB_ORIGIN} 或 ${TARGET_SCOPES.TARGET_ONLY}。`,
+  };
 }
 
 /**
@@ -155,6 +183,11 @@ export function mergeCookieSets(unpartitioned, partitioned) {
 /**
  * Cookie metadata without a single value: what a Service (or a log) may see
  * about *why* a header looks the way it does.
+ *
+ * A whitelist copy is not just tidiness. `chrome.cookies.Cookie` is not a plain
+ * object, so `isJsonCompatible` would refuse the value as-is; and copying by
+ * field means a future field on the browser's object cannot silently travel to
+ * the Service.
  *
  * @param {Array<object>} cookies
  */

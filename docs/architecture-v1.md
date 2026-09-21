@@ -102,6 +102,8 @@ Bridge → Service：
 
 不建立 GET_RESULT、独立 ERROR、BLOCKED、ACK、JOB_CREATED、JOB_FINISHED 等消息。
 
+> 例外（**未冻结**）：第 14 节记录一对实验性消息 `GET_REQUEST_CONTEXT` / `REQUEST_CONTEXT`。它们不属于 V1 契约，有自己的错误码，删掉不影响上面四种消息中的任何一种。
+
 ### 8.1 EXECUTE
 
 ```json
@@ -262,3 +264,36 @@ V1 不做 Runtime 系统、多 Tab/并行、Job Queue/History、Retry/幂等、�
 另外覆盖：第 5.1 节所述的 `USER_SCRIPTS_UNAVAILABLE` 前置条件、脚本抛错返回 `SCRIPT_EXECUTION_FAILED`（场景 8）、Service 断开后自动重连（场景 11）、Bridge 不产生业务状态（场景 12）、非法帧不打断连接。
 
 POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-extension`），并在运行前通过 CDP 打开 Extension 详情页开启 Allow User Scripts。
+
+## 14. 实验性能力：请求上下文（未冻结）
+
+> **这一节不是 V1 契约。** 它记录 issue #13 的实验结果与实现，用于评审；冻结与否由维护者决定。调研与实测见 [docs/research/request-context-poc.md](research/request-context-poc.md)。
+
+**问题**：页面里发现一个资源 URL 后，Service 想用自己的 Node 后端把它下下来。普通页面 JavaScript 拿不到 HttpOnly Cookie，因此需要 Bridge 以**通用、最小权限**的方式回答"浏览器会为这个 URL 发送什么"。Bridge 不因此理解任何网站、媒体或业务概念：它只知道 URL 与浏览器当前状态。
+
+**新增的消息对**（Service → Bridge 请求，Bridge → Service 应答）：
+
+```json
+{ "type": "GET_REQUEST_CONTEXT", "requestId": "rc-1", "targetUrl": "https://cdn.example/media/1?sign=…",
+  "scope": "WORK_TAB_ORIGIN", "topLevelSite": "https://www.example" }
+```
+
+```json
+{ "type": "REQUEST_CONTEXT", "requestId": "rc-1", "ok": true, "context": {
+  "targetUrl": "…", "targetOrigin": "…", "scope": "…", "observedAt": "2026-01-01T00:00:00.000Z",
+  "cookieHeader": "…", "cookieCount": 2, "httpOnlyCookieCount": 1, "partitionedCookieCount": 0,
+  "cookies": [{ "name": "…", "domain": "…", "path": "/", "secure": true, "httpOnly": true,
+                "sameSite": "lax", "session": true, "partitioned": false, "topLevelSite": null }],
+  "userAgent": "…", "userAgentSource": "work-tab-page", "serviceWorkerUserAgent": "…",
+  "referer": "…", "workTabUrl": "…", "documentReferrer": "…", "referrerPolicy": null } }
+```
+
+失败时 `ok:false` + `error:{code,message}`，code 只有：`NOT_READY`、`INVALID_TARGET_URL`、`INVALID_SCOPE`、`TARGET_OUT_OF_SCOPE`、`CONTEXT_FAILED`。
+
+**与 Job 模型的关系**：上下文请求**不占 Job 槽**、在 `RUNNING` 期间照常服务、也不与 `USER_SCRIPTS_UNAVAILABLE` 联动——读 Cookie 与页面事实从不执行 Service JavaScript。它既不改 `currentJob`，也不改 `IDLE/RUNNING/NOT_READY` 的推导。
+
+**权限**：新增 `cookies`（`cookies` 权限本身不新增安装警告）与 `scripting`（读 Work Tab 页面自己的 UA / referrer，worker 代答不了）。读取范围由 `chrome.cookies.getAll({ url })` 与 host 权限共同限制：**Bridge 从不用 `getAll({})` 或 `getAll({domain})`**。
+
+**实测约束**：HttpOnly 可读、SameSite 不影响读取、分区（CHIPS）cookie 必须显式给 `partitionKey`（默认取 Work Tab 的 origin）、UA 必须取自页面、cookie 值不落盘也不进日志。
+
+**验证**：`npm run poc:context`（= `node tests/poc/request-context.mjs`）在真实扩展上跑 15 个场景，含反例与"RUNNING 期间取上下文不影响 Job"；证据写在 `docs/research/evidence/request-context.json`。`npm run poc` 的 12 个 V1 场景不受影响。
