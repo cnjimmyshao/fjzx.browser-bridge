@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Browser Bridge 设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="settings">
+      <h1>Browser Bridge</h1>
+      <p class="lede">
+        Bridge 只保存一个配置项：Service URL。浏览器进程、Profile、Proxy、初始 URL
+        以及全部业务规则都由 Service 负责。
+      </p>
+
+      <form id="settings-form" novalidate>
+        <label for="service-url">Service URL</label>
+        <input
+          id="service-url"
+          name="serviceUrl"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="ws://127.0.0.1:8080"
+          aria-describedby="service-url-status"
+          disabled
+        />
+        <p id="service-url-status" class="status" role="status" aria-live="polite"></p>
+        <div class="actions">
+          <button type="submit" id="save-service-url" disabled>保存</button>
+          <button type="button" id="clear-service-url" class="secondary" disabled>清除</button>
+        </div>
+      </form>
+
+      <section class="state" aria-live="polite">
+        <h2>当前配置</h2>
+        <p id="configured-state" class="configured">读取中…</p>
+      </section>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

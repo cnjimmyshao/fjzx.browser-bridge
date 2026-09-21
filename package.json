@@ -1,0 +1,13 @@
+{
+  "name": "fjzx-browser-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic, site-agnostic Chrome Browser Bridge (Manifest V3 extension).",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,127 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 32px 24px;
+  background: Canvas;
+  color: CanvasText;
+}
+
+.settings {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0 0 8px;
+}
+
+.lede {
+  margin: 0 0 24px;
+  font-size: 13px;
+  line-height: 1.6;
+  opacity: 0.75;
+}
+
+label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  background: Field;
+  border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+  border-radius: 6px;
+}
+
+input[type="text"]:focus-visible {
+  outline: 2px solid Highlight;
+  outline-offset: 1px;
+}
+
+.status {
+  min-height: 18px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.status[data-kind="ok"] {
+  color: #1a7f37;
+}
+
+.status[data-kind="error"] {
+  color: #c0392b;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+button {
+  padding: 7px 16px;
+  font: inherit;
+  font-size: 13px;
+  color: ButtonText;
+  background: ButtonFace;
+  border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, CanvasText 45%, transparent);
+}
+
+/* The form stays disabled until the stored value has been applied. */
+input[type="text"]:disabled,
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button:focus-visible {
+  outline: 2px solid Highlight;
+  outline-offset: 1px;
+}
+
+button.secondary {
+  background: transparent;
+}
+
+.state {
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+}
+
+.state h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+.configured {
+  margin: 0;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  word-break: break-all;
+}
+
+.configured:empty {
+  display: none;
+}
