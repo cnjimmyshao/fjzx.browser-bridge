@@ -10,7 +10,9 @@ import { createServer } from 'node:http';
  *
  *   1. an `HttpOnly` session cookie — the part page JavaScript cannot read;
  *   2. a `Referer` on an allowlist;
- *   3. a non-empty `User-Agent`.
+ *   3. the **same `User-Agent` the session was established with** — so "forgot the
+ *      user agent" is a failure the POC can observe, not a silent success
+ *      (`fetch` always sends one: `user-agent: node`).
  *
  * It also serves a second origin (`localhost` next to `127.0.0.1`): SameSite and
  * partitioned cookies are rules about *sending*, not about storage, so observing
@@ -88,6 +90,16 @@ export async function startProtectedServer(options = {}) {
   const payloadDigest = createHash('sha256').update(payload).digest('hex');
   const log = [];
 
+  /**
+   * The user agent the session was established with.
+   *
+   * Binding the session to it is what makes "the context is necessary" a claim the
+   * POC can actually test: a replay that forgets the user agent does not send
+   * *nothing* — Node's `fetch` sends `user-agent: node` — so without this rule the
+   * omission would silently succeed and prove nothing.
+   */
+  let expectedUserAgent = null;
+
   const server = createServer((request, response) => {
     const path = (request.url ?? '/').split('?')[0];
     const cookies = parseCookies(request.headers.cookie);
@@ -133,6 +145,7 @@ export async function startProtectedServer(options = {}) {
     }
 
     if (path === '/login') {
+      expectedUserAgent = request.headers['user-agent'] ?? null;
       // `sid` is HttpOnly on purpose: it is the piece of context that page
       // JavaScript provably cannot reach. `theme` stays readable as a control.
       finish(200, JSON.stringify({ ok: true, cookieNames: ['sid', 'theme', 'strict'] }), {
@@ -168,6 +181,11 @@ export async function startProtectedServer(options = {}) {
       if (record.userAgent === null || record.userAgent.trim() === '') {
         record.note = 'MISSING_USER_AGENT';
         finish(403, JSON.stringify({ error: 'MISSING_USER_AGENT' }), { 'content-type': 'application/json' });
+        return;
+      }
+      if (expectedUserAgent !== null && record.userAgent !== expectedUserAgent) {
+        record.note = 'USER_AGENT_MISMATCH';
+        finish(403, JSON.stringify({ error: 'USER_AGENT_MISMATCH' }), { 'content-type': 'application/json' });
         return;
       }
 

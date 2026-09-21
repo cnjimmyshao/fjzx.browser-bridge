@@ -163,9 +163,9 @@ issue 的硬约束是 Bridge 不得理解 Douyin / Media / Video / Work。POC �
 | 返回的 `Cookie` 头里含 **HttpOnly** 会话值；`SameSite=Strict` cookie 照样被返回 | ✅ |
 | `userAgent` 来自 Work Tab 页面（`userAgentSource=work-tab-page`），`referer` = Work Tab URL | ✅ |
 | **Node 只用该上下文下载，得到与浏览器逐字节相同的资源**；`Range` 重放 206 | ✅ 65536 B |
-| 对照：不带 Cookie → 401；不带 Referer → 403；`fetch` 不设 UA 会带 `node`（这本身就是自报家门） | ✅ |
+| 对照：不带 Cookie → 401；不带 Referer → 403（`BAD_REFERER`）；**不带 UA → 403**（`USER_AGENT_MISMATCH`，服务端看到的是 undici 默认的 `user-agent: node`）；UA 不匹配 → 403 | ✅ |
 | 跨源目标：默认 `TARGET_OUT_OF_SCOPE`；显式 `scope=TARGET_ONLY` 才允许，且只返回该 host 的 cookie | ✅ |
-| **CHIPS**：默认分区查询能看到第三方 frame 写入的 `Partitioned` cookie；显式 `topLevelSite=null` 就看不到 | ✅ |
+| **CHIPS**：先确认浏览器真的在跨站请求里发了那个 `Partitioned` cookie，再确认默认分区查询能取到它；**换一个 `hasCrossSiteAncestor`（另一个分区）返回空集**，`topLevelSite=null` 也返回空集 | ✅ |
 | 无关 origin 返回 0 个 cookie；`file:` / `javascript:` / 相对 URL / 空串 / 非法 scope 一律拒绝 | ✅ |
 | 页面级 UA 覆盖后，上下文跟随**页面**，而 worker 自身 UA 不变 | ✅ |
 | **没有任何持久化**：`chrome.storage.local` 只有 `serviceUrl` | ✅ |
@@ -215,7 +215,8 @@ cookie: sid=…; theme=…; strict=…
   "requestId": "rc-1",
   "targetUrl": "https://cdn.example.test/media/1?sign=…",
   "scope": "WORK_TAB_ORIGIN",
-  "topLevelSite": "https://www.example.test"
+  "topLevelSite": "https://www.example.test",
+  "hasCrossSiteAncestor": true
 }
 ```
 
@@ -224,7 +225,8 @@ cookie: sid=…; theme=…; strict=…
 | `requestId` | 是 | 与 `jobId` 平行的一次性请求身份；Bridge 原样回显。缺失 → 静默丢弃（没有身份可回答） |
 | `targetUrl` | 是 | **原样含签名参数**、不含 fragment、http(s)、不得内嵌凭据；否则 `INVALID_TARGET_URL` |
 | `scope` | 否 | `WORK_TAB_ORIGIN`（默认，要求与 Work Tab 同源）或 `TARGET_ONLY`（显式允许跨源，但返回集合仍只含匹配该 URL 的 cookie）；其他值 → `INVALID_SCOPE`（不做静默降级） |
-| `topLevelSite` | 否 | CHIPS 分区键。**不传时默认取 Work Tab 的 origin**（子资源的分区由顶层站点决定）；传 `null` 表示明确不要分区查询；传非法 URL → `INVALID_TARGET_URL` |
+| `topLevelSite` | 否 | CHIPS 分区键的站点部分。**不传时默认取 Work Tab 的 origin**（子资源的分区由顶层站点决定）；传 `null` 表示明确不要分区查询；传非法 URL → `INVALID_PARTITION` |
+| `hasCrossSiteAncestor` | 否 | CHIPS 分区键的**另一位**（Chrome 130+）。**只给 `topLevelSite` 会同时命中两种取值**：若两个分区都有同名 cookie，就会一起返回、甚至拼出错误的 `Cookie` 头。不传时由 Bridge 推导（目标相对该站点是否 first-party），必须显式指定时以调用方为准；非 boolean → `INVALID_PARTITION` |
 
 ### 8.2 响应：`REQUEST_CONTEXT`
 
@@ -265,10 +267,11 @@ cookie: sid=…; theme=…; strict=…
 | code | 含义 | 备注 |
 | --- | --- | --- |
 | `NOT_READY` | 没有唯一 Work Tab / 上下文 API 不可用 | **只判绑定与 API 可用性，不与 `USER_SCRIPTS_UNAVAILABLE` 联动**（读 cookie 不需要用户脚本授权，实测场景 4）|
-| `INVALID_TARGET_URL` | 非 http(s)、相对 URL、内嵌凭据、非法 `topLevelSite` | |
+| `INVALID_TARGET_URL` | 非 http(s)、相对 URL、内嵌凭据 | |
 | `INVALID_SCOPE` | `scope` 既不是 `WORK_TAB_ORIGIN` 也不是 `TARGET_ONLY` | 拒绝而不是静默按默认处理 |
+| `INVALID_PARTITION` | `topLevelSite` 不是合法 URL，或 `hasCrossSiteAncestor` 不是 boolean | |
 | `TARGET_OUT_OF_SCOPE` | 默认 scope 下 targetUrl 与 Work Tab 不同源 | 此时**不会**触碰 cookie API |
-| `CONTEXT_FAILED` | `chrome.cookies` 调用失败、上下文不可序列化等 | |
+| `CONTEXT_FAILED` | `chrome.cookies` 调用失败、上下文不可序列化、**采样期间 Work Tab 发生了导航**（重试一次后仍不一致）| |
 
 **刻意不做的**：不返回 `Accept*`/`sec-ch-ua*`/`sec-fetch-*`（可由 Node 构造，Bridge 给"页面自陈"反而可能误导）；不返回 Proxy/出口信息（属 Service）；不缓存、不重试、不排队。
 
@@ -295,7 +298,7 @@ cookie: sid=…; theme=…; strict=…
 
 **已知限制 / 未解决**
 
-1. **分区 cookie 需要调用方声明分区**（§7.2 CHIPS 那条）。Service 若不知道分层结构就会静默拿到空集合——Draft 里用 `topLevelSite` 暴露它，但"用哪个分区"最终是语义问题。
+1. **分区 cookie 需要调用方声明分区**（§7.2 CHIPS 那条）。实测：同一个 URL，`hasCrossSiteAncestor` 取另一个值就是**另一个分区**（返回空集），所以"用哪个分区"最终是语义问题；Bridge 的默认推导（目标是否 first-party）覆盖了最常见的情况，但第三方 frame 里发出的请求要由 Service 说明。
 2. **`WORK_TAB_ORIGIN` 与真实跨源 CDN 需求的张力**（§8.3-1）。
 3. **Cookie 值会以明文穿过 WebSocket**。V1 的 Service URL 可以是任意地址，`ws://` 明文 + 远端 Service = Cookie 在网络上裸奔。**建议在冻结之前明确：本能力要求 `wss://` 或仅限本机/受信网段**（当前实现没有加这条限制）。
 4. **上下文会过期。** 签名 URL 会失效、Cookie 可能被轮换；`observedAt` 只是让 Service 能判断新鲜度，Bridge 不做任何续期。

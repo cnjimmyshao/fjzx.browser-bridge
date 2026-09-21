@@ -14,6 +14,7 @@ import {
   normalizeScope,
   normalizeTargetUrl,
   normalizeTopLevelSite,
+  resolvePartitionKey,
 } from '../src/lib/request-context.js';
 import { USER_AGENT_SOURCES, createRequestContextSource } from '../src/lib/request-context-source.js';
 import { parseServiceMessage } from '../src/lib/protocol.js';
@@ -149,6 +150,48 @@ test('normalizeTopLevelSite keeps the origin, and mergeCookieSets concatenates p
   assert.deepEqual(mergeCookieSets(undefined, undefined), []);
 });
 
+test('resolvePartitionKey always names exactly one partition', () => {
+  // No partition query at all when the caller opts out.
+  assert.deepEqual(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: null }), {
+    ok: true,
+    partitionKey: null,
+  });
+
+  // Same-origin target: the page's own request is first-party to its site.
+  assert.deepEqual(resolvePartitionKey({ targetUrl: `${WORK_TAB_ORIGIN}/media/1`, workTabUrl: WORK_TAB_URL }), {
+    ok: true,
+    partitionKey: { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
+  });
+
+  // Cross-origin target: a partitioned cookie for it can only have been set from
+  // a cross-site context, and `{topLevelSite, hasCrossSiteAncestor:false}` would be
+  // rejected by Chrome for a URL that is not first-party to the site.
+  assert.deepEqual(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL }), {
+    ok: true,
+    partitionKey: { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: true },
+  });
+
+  // An explicit bit wins, in both directions: the caller often knows the frame
+  // nesting better than the target URL does.
+  assert.deepEqual(
+    resolvePartitionKey({ targetUrl: `${WORK_TAB_ORIGIN}/a`, workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: true }).partitionKey,
+    { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: true },
+  );
+  assert.deepEqual(
+    resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: false }).partitionKey,
+    { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
+  );
+
+  // An explicit site replaces the Work Tab default.
+  assert.deepEqual(
+    resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'https://other.test/x' }).partitionKey,
+    { topLevelSite: 'https://other.test', hasCrossSiteAncestor: true },
+  );
+
+  assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: 'yes' }).ok, false);
+  assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'nope' }).ok, false);
+});
+
 test('buildRequestContext separates the suggested referer from the page-reported fact', () => {
   const context = buildRequestContext({
     targetUrl: 'https://cdn.test/media/1?sign=a',
@@ -204,12 +247,15 @@ function createStubChrome({
   cookies = [],
   partitioned = [],
   tabUrl = WORK_TAB_URL,
-  pageFacts = { userAgent: 'PageUA/1.0', documentReferrer: '', referrerPolicy: null },
+  tabUrls = null,
+  pageFacts = { userAgent: 'PageUA/1.0', documentReferrer: '', referrerPolicy: null, pageUrl: WORK_TAB_URL },
   failCookies = false,
   failScripting = false,
   tabMissing = false,
 } = {}) {
   const calls = { getAll: [], executeScript: [], get: [] };
+  let tabReads = 0;
+  let factReads = 0;
   return {
     calls,
     cookies: {
@@ -223,14 +269,21 @@ function createStubChrome({
       async get(tabId) {
         calls.get.push(tabId);
         if (tabMissing) throw new Error('No tab with id');
-        return { id: tabId, url: tabUrl };
+        // `tabUrls` models a page that navigates between two reads of the tab.
+        const url = tabUrls === null ? tabUrl : tabUrls[Math.min(tabReads, tabUrls.length - 1)];
+        tabReads += 1;
+        return { id: tabId, url };
       },
     },
     scripting: {
       async executeScript(details) {
         calls.executeScript.push(details);
         if (failScripting) throw new Error('cannot script this page');
-        return [{ result: pageFacts }];
+        // `pageFacts` may be one object or one per read, so a test can make the
+        // page and the tab disagree on the first attempt only.
+        const facts = Array.isArray(pageFacts) ? pageFacts[Math.min(factReads, pageFacts.length - 1)] : pageFacts;
+        factReads += 1;
+        return [{ result: facts }];
       },
     },
   };
@@ -275,10 +328,13 @@ test('reads cookies for exactly the target URL and includes HttpOnly ones', asyn
     assert.equal(details.url, `${WORK_TAB_ORIGIN}/media/1?sign=x`);
     assert.equal('domain' in details, false);
   }
-  // The default partition is the Work Tab's own origin, because a subresource of
-  // that page lives in that partition.
-  assert.equal(stub.calls.getAll[1].partitionKey.topLevelSite, WORK_TAB_ORIGIN);
-  assert.deepEqual(stub.calls.get, [7]);
+  // The default partition is the Work Tab's own origin plus the exact ancestor
+  // bit, because a subresource of that page lives in exactly one partition.
+  assert.deepEqual(stub.calls.getAll[1].partitionKey, {
+    topLevelSite: WORK_TAB_ORIGIN,
+    hasCrossSiteAncestor: false,
+  });
+  assert.deepEqual(stub.calls.get, [7, 7], '采样前读一次、页面事实之后再确认一次');
 });
 
 test('partitioned cookies are merged in, and an explicit null skips the partition query', async () => {
@@ -302,7 +358,21 @@ test('partitioned cookies are merged in, and an explicit null skips the partitio
     topLevelSite: 'https://top.test/page',
   });
   assert.equal(named.ok, true);
-  assert.equal(stub.calls.getAll.at(-1).partitionKey.topLevelSite, 'https://top.test');
+  assert.deepEqual(stub.calls.getAll.at(-1).partitionKey, {
+    topLevelSite: 'https://top.test',
+    hasCrossSiteAncestor: true,
+  });
+
+  const crossOrigin = await source.read({
+    tabId: 1,
+    targetUrl: 'https://cdn.test/media/1',
+    scope: TARGET_SCOPES.TARGET_ONLY,
+  });
+  assert.equal(crossOrigin.ok, true);
+  assert.deepEqual(stub.calls.getAll.at(-1).partitionKey, {
+    topLevelSite: WORK_TAB_ORIGIN,
+    hasCrossSiteAncestor: true,
+  });
 });
 
 test('the default scope refuses a cross-origin target, TARGET_ONLY allows it', async () => {
@@ -330,10 +400,70 @@ test('refuses a bad target, a bad scope and a bad partition without touching the
   assert.equal(badScope.code, CONTEXT_ERROR_CODES.INVALID_SCOPE);
 
   const badPartition = await source.read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1`, topLevelSite: 'nope' });
-  assert.equal(badPartition.code, CONTEXT_ERROR_CODES.INVALID_TARGET_URL);
+  assert.equal(badPartition.code, CONTEXT_ERROR_CODES.INVALID_PARTITION);
+
+  const badBit = await source.read({
+    tabId: 1,
+    targetUrl: `${WORK_TAB_ORIGIN}/media/1`,
+    hasCrossSiteAncestor: 'yes',
+  });
+  assert.equal(badBit.code, CONTEXT_ERROR_CODES.INVALID_PARTITION);
 
   assert.deepEqual(stub.calls.getAll, []);
   assert.deepEqual(stub.calls.executeScript, []);
+});
+
+test('a navigation during the sample is retried, and never answered with a mixture', async () => {
+  // Attempt 1 sees the old tab URL and the new page's facts — the race the retry
+  // exists for. Attempt 2 sees a settled page and answers from it.
+  const newPage = 'https://moved.test/feed';
+  const newFacts = { userAgent: 'NewUA/1.0', documentReferrer: '', referrerPolicy: null, pageUrl: newPage };
+  const retried = createStubChrome({
+    tabUrls: [WORK_TAB_URL, newPage, newPage],
+    pageFacts: [newFacts],
+    cookies: [{ name: 'sid', value: 's', path: '/' }],
+  });
+  const outcome = await createSource(retried).read({
+    tabId: 1,
+    targetUrl: 'https://cdn.test/media/1',
+    scope: TARGET_SCOPES.TARGET_ONLY,
+  });
+
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.equal(outcome.context.userAgent, 'NewUA/1.0');
+  assert.equal(outcome.context.workTabUrl, newPage, '重试后必须以新页面为准');
+  assert.equal(outcome.context.referer, newPage);
+  assert.equal(retried.calls.getAll.length, 4, '两次采样，每次两个查询');
+  // The partition follows the page the answer actually describes.
+  assert.deepEqual(retried.calls.getAll.at(-1).partitionKey, {
+    topLevelSite: 'https://moved.test',
+    hasCrossSiteAncestor: true,
+  });
+
+  // With the strict scope the same race ends in a refusal, not in a mixture: the
+  // page the caller asked about is no longer the page the tab is on.
+  const strict = createStubChrome({
+    tabUrls: [WORK_TAB_URL, newPage, newPage],
+    pageFacts: [newFacts],
+    cookies: [{ name: 'sid', value: 's', path: '/' }],
+  });
+  const refused = await createSource(strict).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, CONTEXT_ERROR_CODES.TARGET_OUT_OF_SCOPE);
+
+  // A tab whose URL and page facts never agree must not produce a mixture either.
+  const alwaysMoving = createStubChrome({
+    tabUrls: [WORK_TAB_URL, WORK_TAB_URL],
+    pageFacts: [newFacts],
+  });
+  const mixed = await createSource(alwaysMoving).read({
+    tabId: 1,
+    targetUrl: 'https://cdn.test/media/1',
+    scope: TARGET_SCOPES.TARGET_ONLY,
+  });
+  assert.equal(mixed.ok, false);
+  assert.equal(mixed.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+  assert.match(mixed.message, /导航/);
 });
 
 test('an unscriptable page still answers, and says which user agent it used', async () => {
@@ -527,7 +657,13 @@ test('answers a context request without touching the Job slot', async () => {
   assert.equal(h.bridge.state, BRIDGE_STATES.IDLE);
   assert.equal(h.bridge.currentJobId, null, '上下文请求不得占用 Job 槽');
   assert.deepEqual(provider.requests, [
-    { tabId: 42, targetUrl: 'https://app.test/media/1', scope: undefined, topLevelSite: undefined },
+    {
+      tabId: 42,
+      targetUrl: 'https://app.test/media/1',
+      scope: undefined,
+      topLevelSite: undefined,
+      hasCrossSiteAncestor: undefined,
+    },
   ]);
 });
 

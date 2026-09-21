@@ -315,15 +315,31 @@ try {
       userAgent: context.userAgent,
     });
     assert.equal(withoutReferer.status, 403);
+    assert.equal(protectedSite.requestsFor('/media/1').at(-1).note, 'BAD_REFERER');
 
-    const withoutUserAgent = await replay(protectedSite.mediaUrl, { cookieHeader: context.cookieHeader, referer: context.referer });
-    // `fetch` always sends `user-agent: node`; a browser-looking failure needs the
-    // header gone entirely, which only `node:http` can express.
-    assert.equal(withoutUserAgent.status, 200, 'fetch 不设 UA 时会带 node，这本身就是自报家门');
+    // `fetch` cannot send *no* user agent: undici always sends `user-agent: node`.
+    // The protected endpoint binds the session to the UA it was established with,
+    // so "forgot the UA" is a 403 rather than a silent success.
+    const withoutUserAgent = await replay(protectedSite.mediaUrl, {
+      cookieHeader: context.cookieHeader,
+      referer: context.referer,
+    });
+    assert.equal(withoutUserAgent.status, 403);
+    const omitted = protectedSite.requestsFor('/media/1').at(-1);
+    assert.equal(omitted.note, 'USER_AGENT_MISMATCH');
 
-    const record = protectedSite.requestsFor('/media/1').find((entry) => entry.note === 'MISSING_USER_AGENT');
-    assert.equal(record, undefined, '上面的请求不应触发 MISSING_USER_AGENT');
-    observe('Node fetch 的默认 User-Agent', { userAgentSeen: protectedSite.requestsFor('/media/1').at(-1).userAgent });
+    const wrongUserAgent = await replay(protectedSite.mediaUrl, {
+      cookieHeader: context.cookieHeader,
+      referer: context.referer,
+      userAgent: 'SomeOtherClient/1.0',
+    });
+    assert.equal(wrongUserAgent.status, 403);
+
+    observe('省略 UA 时服务端实际收到什么', {
+      userAgentSeen: omitted.userAgent,
+      expected: context.userAgent,
+      note: 'undici 的 fetch 默认发送 `user-agent: node`；这也是为什么"重放必须显式设置 UA"。',
+    });
   });
 
   await scenario('8. 跨源目标：默认拒绝，显式 scope=TARGET_ONLY 才允许', async () => {
@@ -336,21 +352,62 @@ try {
     assert.ok(!allowed.context.cookieHeader.includes('sid='), '会话 cookie 属于另一个 host，不得出现在跨源上下文里');
   });
 
-  await scenario('9. 分区 Cookie（CHIPS）：默认带上，显式 topLevelSite=null 才看不到', async () => {
-    // The third-party frame has written `part` by now; the browser sends it on a
-    // cross-site request, so the profile really holds it.
+  await scenario('9. 分区 Cookie（CHIPS）：浏览器真的发了它，且只能选中一个分区', async () => {
+    // The third-party frame writes `part` asynchronously, so its existence has to be
+    // observed rather than assumed — otherwise a slow run would "pass" while the
+    // cookie did not exist yet.
+    await waitUntil(
+      async () => protectedSite.requestsFor('/login-partitioned').some((entry) => entry.status === 200),
+      10000,
+      '第三方 frame 没有在期限内写入分区 cookie',
+    );
+
+    // A real cross-site request from the page proves the profile really holds it and
+    // that Chrome sends it (the check below is not just "the API can see it").
+    await evaluate(options.port, page, 'document.getElementById("fetch-cross").click(); true');
+    const sent = await waitUntil(
+      async () =>
+        protectedSite.log.find(
+          (entry) => entry.path === '/media/1' && entry.host?.startsWith('localhost') && entry.hasPartitioned,
+        ) ?? null,
+      10000,
+      '浏览器没有在跨站请求里带上分区 cookie',
+    );
+    assert.equal(sent.secFetchSite, 'cross-site');
+
+    // Default partition: the Work Tab's own origin, with the descendant bit derived
+    // from the target not being first-party to it — exactly the partition a
+    // cross-site request from this page lives in.
     const partitioned = await requestContext(protectedSite.altMediaUrl, { scope: 'TARGET_ONLY' });
     const names = partitioned.context.cookies.map((cookie) => cookie.name);
     assert.ok(names.includes('part'), `分区 cookie 应通过默认分区查询返回，实际：${JSON.stringify(names)}`);
     assert.equal(partitioned.context.partitionedCookieCount, 1);
+    assert.deepEqual(
+      partitioned.context.cookies.find((cookie) => cookie.name === 'part').topLevelSite,
+      protectedSite.origin.replace(/:\d+$/, ''),
+    );
+
+    // The other value of the ancestor bit is a different partition: asking for it
+    // explicitly must not hand over the cookie that belongs to this one.
+    const otherPartition = await requestContext(protectedSite.altMediaUrl, {
+      scope: 'TARGET_ONLY',
+      hasCrossSiteAncestor: false,
+    });
+    assert.ok(
+      otherPartition.ok === false || !otherPartition.context.cookies.some((cookie) => cookie.name === 'part'),
+      '另一个分区不得返回本分区的 cookie',
+    );
 
     const withoutPartition = await requestContext(protectedSite.altMediaUrl, { scope: 'TARGET_ONLY', topLevelSite: null });
     assert.ok(
       !withoutPartition.context.cookies.some((cookie) => cookie.name === 'part'),
       '显式 topLevelSite=null 时不应做分区查询',
     );
+
     observe('分区 cookie 的可见性', {
+      browserSentItCrossSite: true,
       withDefaultPartition: partitioned.context.cookies,
+      withOtherAncestorBit: otherPartition.ok ? otherPartition.context.cookies.map((cookie) => cookie.name) : otherPartition.error,
       withoutPartition: withoutPartition.context.cookies.map((cookie) => cookie.name),
     });
   });

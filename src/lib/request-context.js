@@ -46,6 +46,7 @@ export const CONTEXT_ERROR_CODES = Object.freeze({
   NOT_READY: 'NOT_READY',
   INVALID_TARGET_URL: 'INVALID_TARGET_URL',
   INVALID_SCOPE: 'INVALID_SCOPE',
+  INVALID_PARTITION: 'INVALID_PARTITION',
   TARGET_OUT_OF_SCOPE: 'TARGET_OUT_OF_SCOPE',
   CONTEXT_FAILED: 'CONTEXT_FAILED',
 });
@@ -178,6 +179,55 @@ export function mergeCookieSets(unpartitioned, partitioned) {
   const left = Array.isArray(unpartitioned) ? unpartitioned : [];
   const right = Array.isArray(partitioned) ? partitioned : [];
   return [...left, ...right];
+}
+
+/**
+ * Pick the **one** CHIPS partition a replayed request belongs to.
+ *
+ * A partition key is not just the top-level site: since Chrome 130 it also carries
+ * `hasCrossSiteAncestor`, and `{ topLevelSite }` alone matches *both* values of that
+ * bit. Returning both would disclose — and let a Service replay — a cookie from a
+ * partition the request is not in, and a duplicate name would silently produce a
+ * wrong `Cookie` header.
+ *
+ * So the key always ends up exact:
+ *
+ * - `topLevelSite: null` → no partition query at all (opt out);
+ * - omitted `topLevelSite` → the Work Tab's own origin, because a subresource of
+ *   that page is partitioned by its top-level site;
+ * - omitted bit → derived from whether the target is first-party to that site,
+ *   which is both the honest reading of "a request this page would make" and the
+ *   combination Chrome accepts (`{ topLevelSite, hasCrossSiteAncestor: false }` is
+ *   rejected for a URL that is not first-party to the site).
+ *
+ * @param {{
+ *   targetUrl: string,
+ *   workTabUrl: string,
+ *   topLevelSite?: unknown,
+ *   hasCrossSiteAncestor?: unknown,
+ * }} input
+ * @returns {{ok: true, partitionKey: object | null} | {ok: false, reason: string}}
+ */
+export function resolvePartitionKey(input) {
+  if (input.topLevelSite === null) return { ok: true, partitionKey: null };
+
+  if (input.hasCrossSiteAncestor !== undefined && typeof input.hasCrossSiteAncestor !== 'boolean') {
+    return { ok: false, reason: 'hasCrossSiteAncestor 必须是 boolean 或省略。' };
+  }
+
+  const site = normalizeTopLevelSite(
+    input.topLevelSite === undefined ? input.workTabUrl : input.topLevelSite,
+  );
+  if (!site.ok) return { ok: false, reason: site.reason };
+
+  const firstParty = new URL(input.targetUrl).origin === site.topLevelSite;
+  return {
+    ok: true,
+    partitionKey: {
+      topLevelSite: site.topLevelSite,
+      hasCrossSiteAncestor: input.hasCrossSiteAncestor ?? !firstParty,
+    },
+  };
 }
 
 /**

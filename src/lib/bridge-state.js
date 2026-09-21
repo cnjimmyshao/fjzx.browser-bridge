@@ -226,6 +226,7 @@ export function createBridgeState({
         targetUrl: message.targetUrl,
         scope: message.scope,
         topLevelSite: message.topLevelSite,
+        hasCrossSiteAncestor: message.hasCrossSiteAncestor,
       });
     } catch (error) {
       reply(

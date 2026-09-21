@@ -7,7 +7,7 @@ import {
   mergeCookieSets,
   normalizeScope,
   normalizeTargetUrl,
-  normalizeTopLevelSite,
+  resolvePartitionKey,
 } from './request-context.js';
 
 /**
@@ -124,11 +124,81 @@ export function createRequestContextSource(options = {}) {
   }
 
   /**
+   * Take one consistent sample of the Work Tab.
+   *
+   * Returns `{retry: true}` when the page moved under us: the URL read before the
+   * cookie queries and the page facts read after them must describe the same page,
+   * or the answer would mix one origin's cookies and Referer with another origin's
+   * user agent and referrer.
+   */
+  async function sample(request, target, scope) {
+    const workTab = await readWorkTabUrl(request.tabId);
+    if (!workTab.ok) return fail(CONTEXT_ERROR_CODES.NOT_READY, workTab.reason);
+
+    if (scope.scope === TARGET_SCOPES.WORK_TAB_ORIGIN && !isSameOrigin(target.url, workTab.url)) {
+      return fail(
+        CONTEXT_ERROR_CODES.TARGET_OUT_OF_SCOPE,
+        `targetUrl 与 Work Tab 不同源（${new URL(target.url).origin} ≠ ${new URL(workTab.url).origin}）；跨源必须显式使用 scope=${TARGET_SCOPES.TARGET_ONLY}。`,
+      );
+    }
+
+    // Partitioned (CHIPS) cookies are invisible to a `url`-only query, so the
+    // partition has to be named — and named exactly, see `resolvePartitionKey`.
+    const partition = resolvePartitionKey({
+      targetUrl: target.url,
+      workTabUrl: workTab.url,
+      topLevelSite: request.topLevelSite,
+      hasCrossSiteAncestor: request.hasCrossSiteAncestor,
+    });
+    if (!partition.ok) return fail(CONTEXT_ERROR_CODES.INVALID_PARTITION, partition.reason);
+
+    const { cookies } = resolveApis();
+    let all;
+    try {
+      const unpartitioned = await cookies.getAll({ url: target.url });
+      const partitioned =
+        partition.partitionKey === null
+          ? []
+          : await cookies.getAll({ url: target.url, partitionKey: partition.partitionKey });
+      all = mergeCookieSets(unpartitioned, partitioned);
+    } catch (error) {
+      return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `chrome.cookies 读取失败：${describeError(error)}`);
+    }
+
+    const pageFacts = await readPageFacts(request.tabId);
+
+    // The page the facts came from must still be the page the cookies were read
+    // for. A mismatch is not an error the Service can act on — it is a race — so
+    // the caller retries once before giving up.
+    if (pageFacts?.pageUrl !== undefined && !isSameOrigin(pageFacts.pageUrl, workTab.url)) {
+      return { retry: true };
+    }
+    const after = await readWorkTabUrl(request.tabId);
+    if (!after.ok || !isSameOrigin(after.url, workTab.url)) return { retry: true };
+
+    const context = buildRequestContext({
+      targetUrl: target.url,
+      scope: scope.scope,
+      workTabUrl: workTab.url,
+      cookies: all,
+      userAgent: pageFacts?.userAgent ?? navigator.userAgent,
+      userAgentSource: pageFacts ? USER_AGENT_SOURCES.PAGE : USER_AGENT_SOURCES.SERVICE_WORKER,
+      observedAt: new Date().toISOString(),
+      documentReferrer: pageFacts?.documentReferrer ?? null,
+      referrerPolicy: pageFacts?.referrerPolicy ?? null,
+      serviceWorkerUserAgent: navigator.userAgent,
+    });
+
+    return { ok: true, context };
+  }
+
+  /**
    * @param {{
    *   tabId: number,
    *   targetUrl: unknown,
    *   scope?: unknown,
    *   topLevelSite?: unknown,
+   *   hasCrossSiteAncestor?: unknown,
    * }} request
    * @returns {Promise<{ok: true, context: object} | {ok: false, code: string, message: string}>}
    */
@@ -146,59 +216,14 @@ export function createRequestContextSource(options = {}) {
     const scope = normalizeScope(request?.scope);
     if (!scope.ok) return fail(CONTEXT_ERROR_CODES.INVALID_SCOPE, scope.reason);
 
-    const workTab = await readWorkTabUrl(request.tabId);
-    if (!workTab.ok) return fail(CONTEXT_ERROR_CODES.NOT_READY, workTab.reason);
-
-    if (scope.scope === TARGET_SCOPES.WORK_TAB_ORIGIN && !isSameOrigin(target.url, workTab.url)) {
-      return fail(
-        CONTEXT_ERROR_CODES.TARGET_OUT_OF_SCOPE,
-        `targetUrl 与 Work Tab 不同源（${new URL(target.url).origin} ≠ ${new URL(workTab.url).origin}）；跨源必须显式使用 scope=${TARGET_SCOPES.TARGET_ONLY}。`,
-      );
+    // Two attempts: one to notice a navigation that happened mid-sample, one to
+    // answer from the page the tab settled on. A tab that keeps moving is reported
+    // rather than answered with a mixture.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const outcome = await sample(request, target, scope);
+      if (outcome.retry !== true) return outcome;
     }
-
-    // Partitioned (CHIPS) cookies are invisible to a `url`-only query, so the
-    // partition has to be named. A subresource of the Work Tab lives in the Work
-    // Tab's own partition, which makes its origin the only useful default;
-    // `null` opts out of the extra query entirely.
-    let partitionQuery = null;
-    if (request?.topLevelSite === null) {
-      partitionQuery = null;
-    } else if (request?.topLevelSite === undefined) {
-      partitionQuery = new URL(workTab.url).origin;
-    } else {
-      const topLevelSite = normalizeTopLevelSite(request.topLevelSite);
-      if (!topLevelSite.ok) return fail(CONTEXT_ERROR_CODES.INVALID_TARGET_URL, topLevelSite.reason);
-      partitionQuery = topLevelSite.topLevelSite;
-    }
-
-    const { cookies } = resolveApis();
-    let all;
-    try {
-      const unpartitioned = await cookies.getAll({ url: target.url });
-      const partitioned =
-        partitionQuery === null
-          ? []
-          : await cookies.getAll({ url: target.url, partitionKey: { topLevelSite: partitionQuery } });
-      all = mergeCookieSets(unpartitioned, partitioned);
-    } catch (error) {
-      return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `chrome.cookies 读取失败：${describeError(error)}`);
-    }
-
-    const pageFacts = await readPageFacts(request.tabId);
-    const context = buildRequestContext({
-      targetUrl: target.url,
-      scope: scope.scope,
-      workTabUrl: workTab.url,
-      cookies: all,
-      userAgent: pageFacts?.userAgent ?? navigator.userAgent,
-      userAgentSource: pageFacts ? USER_AGENT_SOURCES.PAGE : USER_AGENT_SOURCES.SERVICE_WORKER,
-      observedAt: new Date().toISOString(),
-      documentReferrer: pageFacts?.documentReferrer ?? null,
-      referrerPolicy: pageFacts?.referrerPolicy ?? null,
-      serviceWorkerUserAgent: navigator.userAgent,
-    });
-
-    return { ok: true, context };
+    return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, 'Work Tab 在采样期间发生了导航，无法给出同一页面的上下文。');
   }
 
   return { isAvailable, read };

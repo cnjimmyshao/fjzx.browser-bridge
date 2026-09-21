@@ -1,8 +1,8 @@
 {
-  "at": "2026-09-21T13:57:00.665Z",
+  "at": "2026-09-21T14:05:25.467Z",
   "extension": "D:\\nodejs\\com.fajiezhixin.browser-bridge\\src",
-  "service": "ws://127.0.0.1:34696",
-  "origin": "http://127.0.0.1:34695",
+  "service": "ws://127.0.0.1:25884",
+  "origin": "http://127.0.0.1:25883",
   "summary": {
     "total": 15,
     "passed": 15,
@@ -42,7 +42,7 @@
       "ok": true
     },
     {
-      "name": "9. 分区 Cookie（CHIPS）：默认带上，显式 topLevelSite=null 才看不到",
+      "name": "9. 分区 Cookie（CHIPS）：浏览器真的发了它，且只能选中一个分区",
       "ok": true
     },
     {
@@ -92,7 +92,7 @@
           "sec-fetch-site": "same-origin",
           "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
         },
-        "referer": "http://127.0.0.1:34695/feed",
+        "referer": "http://127.0.0.1:25883/feed",
         "cookieNames": [
           "sid",
           "theme",
@@ -140,7 +140,7 @@
           }
         ],
         "userAgentSource": "work-tab-page",
-        "observedAt": "2026-09-21T13:56:58.877Z"
+        "observedAt": "2026-09-21T14:05:23.460Z"
       }
     },
     {
@@ -148,18 +148,21 @@
       "detail": {
         "status": 200,
         "bytes": 65536,
-        "digest": "a908bbc7de3181bb00553aef858ded325ea5515ec7672558d36437a287ec730f"
+        "digest": "e1042366392ac16be0ac454e8f3f243017c71ebee306863e280b138739a5f3dc"
       }
     },
     {
-      "name": "Node fetch 的默认 User-Agent",
+      "name": "省略 UA 时服务端实际收到什么",
       "detail": {
-        "userAgentSeen": "node"
+        "userAgentSeen": "node",
+        "expected": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+        "note": "undici 的 fetch 默认发送 `user-agent: node`；这也是为什么\"重放必须显式设置 UA\"。"
       }
     },
     {
       "name": "分区 cookie 的可见性",
       "detail": {
+        "browserSentItCrossSite": true,
         "withDefaultPartition": [
           {
             "name": "part",
@@ -173,6 +176,7 @@
             "topLevelSite": "http://127.0.0.1"
           }
         ],
+        "withOtherAncestorBit": [],
         "withoutPartition": []
       }
     },

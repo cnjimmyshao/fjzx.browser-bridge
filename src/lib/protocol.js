@@ -136,6 +136,7 @@ export function parseServiceMessage(raw) {
     };
     if ('scope' in parsed) message.scope = parsed.scope;
     if ('topLevelSite' in parsed) message.topLevelSite = parsed.topLevelSite;
+    if ('hasCrossSiteAncestor' in parsed) message.hasCrossSiteAncestor = parsed.hasCrossSiteAncestor;
     return { ok: true, message };
   }
 

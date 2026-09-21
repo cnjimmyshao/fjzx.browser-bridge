@@ -275,7 +275,7 @@ POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-e
 
 ```json
 { "type": "GET_REQUEST_CONTEXT", "requestId": "rc-1", "targetUrl": "https://cdn.example/media/1?sign=…",
-  "scope": "WORK_TAB_ORIGIN", "topLevelSite": "https://www.example" }
+  "scope": "WORK_TAB_ORIGIN", "topLevelSite": "https://www.example", "hasCrossSiteAncestor": true }
 ```
 
 ```json
@@ -288,12 +288,12 @@ POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-e
   "referer": "…", "workTabUrl": "…", "documentReferrer": "…", "referrerPolicy": null } }
 ```
 
-失败时 `ok:false` + `error:{code,message}`，code 只有：`NOT_READY`、`INVALID_TARGET_URL`、`INVALID_SCOPE`、`TARGET_OUT_OF_SCOPE`、`CONTEXT_FAILED`。
+失败时 `ok:false` + `error:{code,message}`，code 只有：`NOT_READY`、`INVALID_TARGET_URL`、`INVALID_SCOPE`、`INVALID_PARTITION`、`TARGET_OUT_OF_SCOPE`、`CONTEXT_FAILED`。
 
 **与 Job 模型的关系**：上下文请求**不占 Job 槽**、在 `RUNNING` 期间照常服务、也不与 `USER_SCRIPTS_UNAVAILABLE` 联动——读 Cookie 与页面事实从不执行 Service JavaScript。它既不改 `currentJob`，也不改 `IDLE/RUNNING/NOT_READY` 的推导。
 
 **权限**：新增 `cookies`（`cookies` 权限本身不新增安装警告）与 `scripting`（读 Work Tab 页面自己的 UA / referrer，worker 代答不了）。读取范围由 `chrome.cookies.getAll({ url })` 与 host 权限共同限制：**Bridge 从不用 `getAll({})` 或 `getAll({domain})`**。
 
-**实测约束**：HttpOnly 可读、SameSite 不影响读取、分区（CHIPS）cookie 必须显式给 `partitionKey`（默认取 Work Tab 的 origin）、UA 必须取自页面、cookie 值不落盘也不进日志。
+**实测约束**：HttpOnly 可读；SameSite 不影响读取；**分区（CHIPS）cookie 必须给出完整的分区键** —— 只有 `topLevelSite` 会同时命中 `hasCrossSiteAncestor` 的两种取值（两个分区都有同名 cookie 时会一起返回），因此 Bridge 总是补全这一位（默认由"目标是否 first-party"推导，可由请求覆盖）；UA 必须取自页面；一次采样必须来自同一个页面（中途导航会重试一次，仍不一致则报 `CONTEXT_FAILED`）；cookie 值不落盘也不进日志。
 
 **验证**：`npm run poc:context`（= `node tests/poc/request-context.mjs`）在真实扩展上跑 15 个场景，含反例与"RUNNING 期间取上下文不影响 Job"；证据写在 `docs/research/evidence/request-context.json`。`npm run poc` 的 12 个 V1 场景不受影响。
