@@ -263,7 +263,7 @@ cookie: sid=…; theme=…; strict=…
 
 `referer` 是 Bridge 的**建议值**；`documentReferrer` 是页面自陈的**事实**（Chrome 153 上 `referrerPolicy` 恒为 `null`，见 [§7.4](#74-两个被-poc-纠正的实现细节)）。把两者分开返回，是为了不在 Bridge 里替 Service 判断"真实的发起页是谁"。
 
-`duplicateCookieNames` 非空表示 `cookieHeader` 里出现了同名 cookie（分区与非分区是两份 cookie，可以同名同 path，浏览器会把两份都发出去）。Chrome 在**同一 path 长度内**按创建时间排序，而 `chrome.cookies` 不暴露创建时间——Bridge 因此无法复现那段顺序，只能把冲突**显式报告**出来，由 Service 用 `cookies[].partitioned` / `topLevelSite` 自己判断。
+`duplicateCookieNames` 非空表示 `cookieHeader` 里出现了**同一 path 长度内同名**的 cookie（分区与非分区是两份 cookie，可以同名同 path，浏览器会把两份都发出去）。Chrome 先按 path 长度排序、再按创建时间排序，而 `chrome.cookies` 不暴露创建时间——所以只有**同一 path 长度内的并列**无法复现，Bridge 把这种真正有歧义的情况**显式报告**出来，由 Service 用 `cookies[].partitioned` / `topLevelSite` 自己判断；仅仅是同名但 path 长度不同（顺序本来就是确定的）不会进入这个字段。另外，Chrome 可能持有形如 `=value` 的**无名 cookie**：它同样会被保留在 `cookieHeader` 与元数据里，不会被静默丢掉。
 
 失败（`ok:false`）沿用 V1 `RESULT.error` 的形状：`{ code, message }`。code 集合（`CONTEXT_ERROR_CODES`，与 V1 的 `ERROR_CODES` **分开**，不动后者）：
 
@@ -311,7 +311,7 @@ cookie: sid=…; theme=…; strict=…
 6. **Bridge 给的是"页面自陈的事实"，不是"线上真相"。** 实测已经看到两处背离：页面级 UA 覆盖会让页面值与 SW 值不同（实现选了页面值），而 `declarativeNetRequest` 改的是**线上头**、页面 `navigator.userAgent` 完全不变。想要逐字还原真实 wire 头，MV3 里只有 `chrome.debugger`+CDP 一条路（并付出权限警告、调试提示条、与 DevTools 冲突、可能被企业策略阻止的代价）。**本能力不承诺 L4 级保真。**
 7. **未做 Edge 实测**：Edge 复用 Chromium 实现、官方对 `chrome.cookies` 参数级行为零文档（[01 §12](notes/01-cookie-api.md)）——同一套代码，但参数级行为需在 Edge 上复测。
 8. **未做 incognito / 企业策略路径**：`runtime_blocked_hosts` 可能让 `getAll` 返回空或失败；实现里需要降级分支。
-9. **同名 cookie 的顺序无法完全复现**：分区与非分区可以同名同 path，浏览器按 path + 创建时间排序后两份都发；API 不暴露创建时间，因此同一 path 长度内的顺序做不到逐字复现。实现选择**显式报告**（`duplicateCookieNames`）而不是猜。实测里 cookie 顺序与浏览器一致的场景，都是没有同名冲突的情况。
+9. **同一 path 长度内的同名 cookie 顺序无法复现**：分区与非分区可以同名同 path，浏览器按 path + 创建时间排序后两份都发；API 不暴露创建时间，所以只有"同一 path 长度内的并列"做不到逐字复现（path 长度不同时顺序本就确定）。实现选择**显式报告**（`duplicateCookieNames`）而不是猜。
 10. **页面读不到就是失败，不会降级**：若用户限制了扩展对该站点的访问，`chrome.scripting` 会拒绝执行——而此时 `chrome.cookies` 也在静默过滤，所以实现直接返回 `CONTEXT_FAILED`，而不是回退到 worker 自己的 UA 交出一份"看起来完整"的上下文。
 11. **采样期间绑定变化会被拦下**：读取是异步的，期间出现第二个普通 Tab 会让 Bridge 变成 `MULTIPLE_TABS`；实现会先等 Work Tab 的当前快照（`settled()`）再复验绑定，变化时返回 `NOT_READY`，而不是继续披露按旧绑定采到的上下文。
 12. **隐身窗口要走对的 cookie store**：扩展在隐身模式下启用时，隐身 Tab 有自己的 store；不传 `storeId` 的 `getAll` 会读到普通 profile 的 store（既漏掉隐身会话，又可能把普通 profile 的 cookie 交出去）。实现用 `getAllCookieStores()` 按 `tabId` 解析 store 并显式传入；没有任何 store 认领该 Tab 时退回默认 store（不猜）。

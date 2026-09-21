@@ -136,12 +136,17 @@ export function buildCookieHeader(cookies) {
   if (!Array.isArray(cookies)) return '';
 
   return cookies
-    .filter((cookie) => cookie && typeof cookie.name === 'string' && cookie.name !== '')
+    .filter((cookie) => cookie && typeof cookie.name === 'string')
     .map((cookie) => ({
       name: cookie.name,
       value: typeof cookie.value === 'string' ? cookie.value : '',
       path: typeof cookie.path === 'string' ? cookie.path : '/',
     }))
+    // A nameless cookie with a value is a legacy form Chrome can hold and send as
+    // `=value`; dropping it would leave the header short of a cookie the browser
+    // sends while `describeCookies` still counted it. Only a pair that is empty on
+    // both sides carries nothing.
+    .filter((cookie) => cookie.name !== '' || cookie.value !== '')
     .sort((left, right) => right.path.length - left.path.length)
     .map((cookie) => `${cookie.name}=${cookie.value}`)
     .join('; ');
@@ -263,28 +268,31 @@ export function resolvePartitionKey(input) {
 }
 
 /**
- * Names that appear more than once in one cookie set.
+ * Names whose ordering Bridge cannot reproduce.
  *
  * A partitioned cookie and an unpartitioned one are different cookies, so they can
  * share a name and a path; both match a request and Chrome sends both, ordered by
- * path and then by creation time. `chrome.cookies` exposes no creation time, so
- * within one path length Bridge cannot reproduce that order — surfacing the
- * conflict is the honest alternative to silently guessing which one a
- * position-sensitive server would read first.
+ * path length and then by creation time. Longer paths first is reproducible, and so
+ * is anything at a different length — only a tie **within one path length** falls
+ * back to creation time, which `chrome.cookies` does not expose. Reporting exactly
+ * those ties is the honest alternative to guessing, and keeps a merely repeated
+ * name (deterministic order) out of the field.
  *
- * @param {Array<{name?: unknown}>} cookies
+ * @param {Array<{name?: unknown, path?: unknown}>} cookies
  * @returns {string[]} sorted, unique
  */
 export function findDuplicateCookieNames(cookies) {
   if (!Array.isArray(cookies)) return [];
   const seen = new Set();
-  const duplicates = new Set();
+  const ambiguous = new Set();
   for (const cookie of cookies) {
-    if (!cookie || typeof cookie.name !== 'string' || cookie.name === '') continue;
-    if (seen.has(cookie.name)) duplicates.add(cookie.name);
-    seen.add(cookie.name);
+    if (!cookie || typeof cookie.name !== 'string') continue;
+    const path = typeof cookie.path === 'string' ? cookie.path : '/';
+    const key = `${cookie.name}\u0000${path.length}`;
+    if (seen.has(key)) ambiguous.add(cookie.name);
+    seen.add(key);
   }
-  return [...duplicates].sort();
+  return [...ambiguous].sort();
 }
 
 /**

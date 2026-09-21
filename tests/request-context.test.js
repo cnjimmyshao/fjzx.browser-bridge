@@ -98,9 +98,55 @@ test('buildCookieHeader orders longer paths first but keeps the browser order wi
   );
 });
 
-test('buildCookieHeader is total and never invents a value', () => {
+test('buildCookieHeader is total, keeps nameless cookies, and never invents a value', () => {
   assert.equal(buildCookieHeader(undefined), '');
   assert.equal(buildCookieHeader([null, {}, { name: '' }, { name: 'ok' }]), 'ok=');
+  // A nameless cookie with a value is a legacy form Chrome can hold and send; the
+  // metadata counts it, so the header must carry it too.
+  assert.equal(buildCookieHeader([{ name: '', value: 'legacy', path: '/' }]), '=legacy');
+  assert.equal(buildCookieHeader([{ name: '', value: '' }]), '', '两边都空才是真的什么都没有');
+});
+
+test('duplicate cookie names are surfaced instead of silently ordered', () => {
+  // A partitioned cookie and an unpartitioned one are different cookies, so they
+  // can share a name and a path. Chrome sends both, ordered by path length and then
+  // creation time — and the API exposes no creation time, so a tie within one path
+  // length cannot be reproduced. Saying so beats guessing.
+  const context = buildRequestContext({
+    targetUrl: 'https://cdn.test/media/1',
+    scope: TARGET_SCOPES.TARGET_ONLY,
+    workTabUrl: WORK_TAB_URL,
+    cookies: [
+      { name: 'sid', value: 'unpartitioned', path: '/' },
+      { name: 'sid', value: 'partitioned', path: '/', partitionKey: { topLevelSite: WORK_TAB_ORIGIN } },
+      { name: 'theme', value: 'dark', path: '/' },
+    ],
+    userAgent: 'UA/1.0',
+    userAgentSource: USER_AGENT_SOURCES.PAGE,
+    observedAt: '2026-01-01T00:00:00.000Z',
+  });
+
+  assert.equal(context.cookieHeader, 'sid=unpartitioned; sid=partitioned; theme=dark');
+  assert.deepEqual(context.duplicateCookieNames, ['sid']);
+  assert.equal(context.cookies.find((cookie) => cookie.value !== undefined), undefined, '元数据里没有值');
+  assert.deepEqual(context.cookies.map((cookie) => cookie.partitioned), [false, true, false]);
+
+  assert.deepEqual(findDuplicateCookieNames([{ name: 'a' }, { name: 'b' }]), []);
+  assert.deepEqual(findDuplicateCookieNames(undefined), []);
+  assert.deepEqual(
+    findDuplicateCookieNames([{ name: 'a', path: '/' }, { name: 'a', path: '/' }, { name: 'b', path: '/' }, { name: 'b', path: '/x' }]),
+    ['a'],
+  );
+  // A repeated name at *different* path lengths is ordered deterministically
+  // (longest path first), so it is not ambiguous and must not be reported.
+  assert.deepEqual(
+    findDuplicateCookieNames([
+      { name: 'sid', path: '/media' },
+      { name: 'sid', path: '/' },
+      { name: 'sid', path: '/deep/media' },
+    ]),
+    [],
+  );
 });
 
 test('describeCookies reports metadata, never a value, and stays JSON-compatible', () => {
@@ -223,9 +269,9 @@ test('isSameSite compares scheme and registrable host, not origins', () => {
 
 test('duplicate cookie names are surfaced instead of silently ordered', () => {
   // A partitioned cookie and an unpartitioned one are different cookies, so they
-  // can share a name and a path. Chrome sends both, ordered by path then creation
-  // time — and the API exposes no creation time, so within one path length the
-  // order cannot be reproduced. Saying so beats guessing.
+  // can share a name and a path. Chrome sends both, ordered by path length and then
+  // creation time — and the API exposes no creation time, so a tie within one path
+  // length cannot be reproduced. Saying so beats guessing.
   const context = buildRequestContext({
     targetUrl: 'https://cdn.test/media/1',
     scope: TARGET_SCOPES.TARGET_ONLY,
@@ -247,7 +293,20 @@ test('duplicate cookie names are surfaced instead of silently ordered', () => {
 
   assert.deepEqual(findDuplicateCookieNames([{ name: 'a' }, { name: 'b' }]), []);
   assert.deepEqual(findDuplicateCookieNames(undefined), []);
-  assert.deepEqual(findDuplicateCookieNames([{ name: 'a' }, { name: 'a' }, { name: 'b' }, { name: 'b' }]), ['a', 'b']);
+  assert.deepEqual(
+    findDuplicateCookieNames([{ name: 'a', path: '/' }, { name: 'a', path: '/' }, { name: 'b', path: '/' }, { name: 'b', path: '/x' }]),
+    ['a'],
+  );
+  // A repeated name at *different* path lengths is ordered deterministically
+  // (longest path first), so it is not ambiguous and must not be reported.
+  assert.deepEqual(
+    findDuplicateCookieNames([
+      { name: 'sid', path: '/media' },
+      { name: 'sid', path: '/' },
+      { name: 'sid', path: '/deep/media' },
+    ]),
+    [],
+  );
 });
 
 test('buildRequestContext separates the suggested referer from the page-reported fact', () => {
