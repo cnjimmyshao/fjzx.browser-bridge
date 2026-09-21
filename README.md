@@ -248,7 +248,7 @@ issue #13 的调研、POC，以及**按维护者要求做进真扩展的实验�
 
 `GET_REQUEST_CONTEXT` / `REQUEST_CONTEXT` 是**新增的一对实验性消息**（架构文档 §13），错误码自成一套（`NOT_READY` / `INVALID_TARGET_URL` / `INVALID_SCOPE` / `TARGET_OUT_OF_SCOPE` / `CONTEXT_FAILED`），删掉它不会影响 V1 的任何行为。是否冻结、是否保留 `cookies` + `scripting` 权限，都还留给评审决定。
 
-实测事实（Chrome for Testing 153）：`chrome.cookies.getAll({url})` 能拿到 **HttpOnly** cookie（页面 JS 看不到）；`SameSite=Strict` 不影响读取；**分区（CHIPS）cookie 必须给出完整分区键**——只给顶层站点会同时命中 `hasCrossSiteAncestor` 的两种取值，实测换一位就是另一个分区（空集）；页面级 UA 覆盖后上下文跟随页面；全程不落盘、日志里没有 cookie 值。
+实测事实（Chrome for Testing 153）：`chrome.cookies.getAll({url})` 能拿到 **HttpOnly** cookie（页面 JS 看不到）；`SameSite=Strict` 不影响读取；**分区（CHIPS）cookie 必须给出完整分区键**——只给顶层站点会同时命中 `hasCrossSiteAncestor` 的两种取值，实测同一 URL 换这一位就是另一个分区（另一位取到、这一位空集）；页面级 UA 覆盖后上下文跟随页面；全程不落盘、日志里没有 cookie 值。
 
 ## 开发
 

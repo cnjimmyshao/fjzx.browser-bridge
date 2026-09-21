@@ -165,7 +165,7 @@ issue 的硬约束是 Bridge 不得理解 Douyin / Media / Video / Work。POC �
 | **Node 只用该上下文下载，得到与浏览器逐字节相同的资源**；`Range` 重放 206 | ✅ 65536 B |
 | 对照：不带 Cookie → 401；不带 Referer → 403（`BAD_REFERER`）；**不带 UA → 403**（`USER_AGENT_MISMATCH`，服务端看到的是 undici 默认的 `user-agent: node`）；UA 不匹配 → 403 | ✅ |
 | 跨源目标：默认 `TARGET_OUT_OF_SCOPE`；显式 `scope=TARGET_ONLY` 才允许，且只返回该 host 的 cookie | ✅ |
-| **CHIPS**：先确认浏览器真的在跨站请求里发了那个 `Partitioned` cookie，再确认默认分区查询能取到它；**换一个 `hasCrossSiteAncestor`（另一个分区）返回空集**，`topLevelSite=null` 也返回空集 | ✅ |
+| **CHIPS**：先确认浏览器真的在跨站请求里发了那个 `Partitioned` cookie；默认分区（顶层文档的请求，`hasCrossSiteAncestor=false`）**不含**它——它是第三方 frame 写进另一个分区的；显式 `hasCrossSiteAncestor: true` 时**恰好只返回它**；`topLevelSite=null` 返回空集 | ✅ |
 | 无关 origin 返回 0 个 cookie；`file:` / `javascript:` / 相对 URL / 空串 / 非法 scope 一律拒绝 | ✅ |
 | 页面级 UA 覆盖后，上下文跟随**页面**，而 worker 自身 UA 不变 | ✅ |
 | **没有任何持久化**：`chrome.storage.local` 只有 `serviceUrl` | ✅ |
@@ -226,7 +226,7 @@ cookie: sid=…; theme=…; strict=…
 | `targetUrl` | 是 | **原样含签名参数**、不含 fragment、http(s)、不得内嵌凭据；否则 `INVALID_TARGET_URL` |
 | `scope` | 否 | `WORK_TAB_ORIGIN`（默认，要求与 Work Tab 同源）或 `TARGET_ONLY`（显式允许跨源，但返回集合仍只含匹配该 URL 的 cookie）；其他值 → `INVALID_SCOPE`（不做静默降级） |
 | `topLevelSite` | 否 | CHIPS 分区键的站点部分。**不传时默认取 Work Tab 的 origin**（子资源的分区由顶层站点决定）；传 `null` 表示明确不要分区查询；传非法 URL → `INVALID_PARTITION` |
-| `hasCrossSiteAncestor` | 否 | CHIPS 分区键的**另一位**（Chrome 130+）。**只给 `topLevelSite` 会同时命中两种取值**：若两个分区都有同名 cookie，就会一起返回、甚至拼出错误的 `Cookie` 头。不传时由 Bridge 推导（目标相对该站点是否 first-party），必须显式指定时以调用方为准；非 boolean → `INVALID_PARTITION` |
+| `hasCrossSiteAncestor` | 否 | CHIPS 分区键的**另一位**（Chrome 130+）。**只给 `topLevelSite` 会同时命中两种取值**：若两个分区都有同名 cookie，就会一起返回、甚至拼出错误的 `Cookie` 头。这一位描述的是**发起请求的那个 frame 的祖先链**，不是目标的站点：顶层上下文按设计恒为 `false`，只有通过第三方上下文才为 `true`。所以默认是 `false`（本能力的主要场景：Work Tab 页面自己发出的请求，哪怕是跨站子资源），从第三方 frame 发出的请求要显式传 `true`；按"目标是否跨源/跨站"推导会在两个方向上都错。非 boolean → `INVALID_PARTITION` |
 
 ### 8.2 响应：`REQUEST_CONTEXT`
 
@@ -244,6 +244,7 @@ cookie: sid=…; theme=…; strict=…
     "cookieCount": 2,
     "httpOnlyCookieCount": 1,
     "partitionedCookieCount": 0,
+    "duplicateCookieNames": [],
     "cookies": [
       { "name": "sid", "domain": "cdn.example.test", "path": "/", "secure": true,
         "httpOnly": true, "sameSite": "lax", "session": true,
@@ -261,6 +262,8 @@ cookie: sid=…; theme=…; strict=…
 ```
 
 `referer` 是 Bridge 的**建议值**；`documentReferrer` 是页面自陈的**事实**（Chrome 153 上 `referrerPolicy` 恒为 `null`，见 [§7.4](#74-两个被-poc-纠正的实现细节)）。把两者分开返回，是为了不在 Bridge 里替 Service 判断"真实的发起页是谁"。
+
+`duplicateCookieNames` 非空表示 `cookieHeader` 里出现了同名 cookie（分区与非分区是两份 cookie，可以同名同 path，浏览器会把两份都发出去）。Chrome 在**同一 path 长度内**按创建时间排序，而 `chrome.cookies` 不暴露创建时间——Bridge 因此无法复现那段顺序，只能把冲突**显式报告**出来，由 Service 用 `cookies[].partitioned` / `topLevelSite` 自己判断。
 
 失败（`ok:false`）沿用 V1 `RESULT.error` 的形状：`{ code, message }`。code 集合（`CONTEXT_ERROR_CODES`，与 V1 的 `ERROR_CODES` **分开**，不动后者）：
 
@@ -298,7 +301,7 @@ cookie: sid=…; theme=…; strict=…
 
 **已知限制 / 未解决**
 
-1. **分区 cookie 需要调用方声明分区**（§7.2 CHIPS 那条）。实测：同一个 URL，`hasCrossSiteAncestor` 取另一个值就是**另一个分区**（返回空集），所以"用哪个分区"最终是语义问题；Bridge 的默认推导（目标是否 first-party）覆盖了最常见的情况，但第三方 frame 里发出的请求要由 Service 说明。
+1. **分区 cookie 的选择是语义问题**（§7.2 CHIPS 那条）。实测：同一个 URL，`hasCrossSiteAncestor` 取另一位就是**另一个分区**（另一份 cookie 或空集），两位互不包含。默认 `false` 覆盖"页面自己发出的请求"；第三方 frame 里发出的请求必须由 Service 说明。另外，查阅资料时看到的"`{topLevelSite, hasCrossSiteAncestor:false}` 对非 first-party 的 URL 会报错"在 Chrome 153 上**没有被复现**：实际是返回空集，不抛错。
 2. **`WORK_TAB_ORIGIN` 与真实跨源 CDN 需求的张力**（§8.3-1）。
 3. **Cookie 值会以明文穿过 WebSocket**。V1 的 Service URL 可以是任意地址，`ws://` 明文 + 远端 Service = Cookie 在网络上裸奔。**建议在冻结之前明确：本能力要求 `wss://` 或仅限本机/受信网段**（当前实现没有加这条限制）。
 4. **上下文会过期。** 签名 URL 会失效、Cookie 可能被轮换；`observedAt` 只是让 Service 能判断新鲜度，Bridge 不做任何续期。
@@ -306,7 +309,8 @@ cookie: sid=…; theme=…; strict=…
 6. **Bridge 给的是"页面自陈的事实"，不是"线上真相"。** 实测已经看到两处背离：页面级 UA 覆盖会让页面值与 SW 值不同（实现选了页面值），而 `declarativeNetRequest` 改的是**线上头**、页面 `navigator.userAgent` 完全不变。想要逐字还原真实 wire 头，MV3 里只有 `chrome.debugger`+CDP 一条路（并付出权限警告、调试提示条、与 DevTools 冲突、可能被企业策略阻止的代价）。**本能力不承诺 L4 级保真。**
 7. **未做 Edge 实测**：Edge 复用 Chromium 实现、官方对 `chrome.cookies` 参数级行为零文档（[01 §12](notes/01-cookie-api.md)）——同一套代码，但参数级行为需在 Edge 上复测。
 8. **未做 incognito / 企业策略路径**：`runtime_blocked_hosts` 可能让 `getAll` 返回空或失败；实现里需要降级分支。
-9. **需求侧证据显示当前用不上 Cookie**（[04](notes/04-service-side-need.md)）：`pr-douyin` 不发 Cookie 也能下四类媒体；`media_fetch_http_403`（9/416）的成因未知。**在拿到真实失败复现之前，扩大权限面的收益无法证明。**
+9. **同名 cookie 的顺序无法完全复现**：分区与非分区可以同名同 path，浏览器按 path + 创建时间排序后两份都发；API 不暴露创建时间，因此同一 path 长度内的顺序做不到逐字复现。实现选择**显式报告**（`duplicateCookieNames`）而不是猜。实测里 cookie 顺序与浏览器一致的场景，都是没有同名冲突的情况。
+10. **需求侧证据显示当前用不上 Cookie**（[04](notes/04-service-side-need.md)）：`pr-douyin` 不发 Cookie 也能下四类媒体；`media_fetch_http_403`（9/416）的成因未知。**在拿到真实失败复现之前，扩大权限面的收益无法证明。**
 
 ---
 

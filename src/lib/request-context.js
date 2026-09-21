@@ -190,18 +190,16 @@ export function mergeCookieSets(unpartitioned, partitioned) {
  * partition the request is not in, and a duplicate name would silently produce a
  * wrong `Cookie` header.
  *
- * So the key always ends up exact:
- *
- * - `topLevelSite: null` → no partition query at all (opt out);
- * - omitted `topLevelSite` → the Work Tab's own origin, because a subresource of
- *   that page is partitioned by its top-level site;
- * - omitted bit → derived from whether the target is first-party to that site,
- *   which is both the honest reading of "a request this page would make" and the
- *   combination Chrome accepts (`{ topLevelSite, hasCrossSiteAncestor: false }` is
- *   rejected for a URL that is not first-party to the site).
+ * The bit describes the **request's frame ancestry**, not the target's site:
+ * by design the top-level context is always `false`, and a cookie is `true` only
+ * when it was reached through a third-party context. A request the Work Tab's own
+ * document makes — the case this capability exists for, including a cross-site
+ * subresource — therefore has `false`, while a request made from a third-party
+ * frame needs `true`. Deriving it from "is the target cross-origin/cross-site"
+ * would get it wrong in both directions, which is why the default is simply the
+ * top-level one and the caller can override it.
  *
  * @param {{
- *   targetUrl: string,
  *   workTabUrl: string,
  *   topLevelSite?: unknown,
  *   hasCrossSiteAncestor?: unknown,
@@ -220,14 +218,38 @@ export function resolvePartitionKey(input) {
   );
   if (!site.ok) return { ok: false, reason: site.reason };
 
-  const firstParty = new URL(input.targetUrl).origin === site.topLevelSite;
   return {
     ok: true,
     partitionKey: {
       topLevelSite: site.topLevelSite,
-      hasCrossSiteAncestor: input.hasCrossSiteAncestor ?? !firstParty,
+      hasCrossSiteAncestor: input.hasCrossSiteAncestor ?? false,
     },
   };
+}
+
+/**
+ * Names that appear more than once in one cookie set.
+ *
+ * A partitioned cookie and an unpartitioned one are different cookies, so they can
+ * share a name and a path; both match a request and Chrome sends both, ordered by
+ * path and then by creation time. `chrome.cookies` exposes no creation time, so
+ * within one path length Bridge cannot reproduce that order — surfacing the
+ * conflict is the honest alternative to silently guessing which one a
+ * position-sensitive server would read first.
+ *
+ * @param {Array<{name?: unknown}>} cookies
+ * @returns {string[]} sorted, unique
+ */
+export function findDuplicateCookieNames(cookies) {
+  if (!Array.isArray(cookies)) return [];
+  const seen = new Set();
+  const duplicates = new Set();
+  for (const cookie of cookies) {
+    if (!cookie || typeof cookie.name !== 'string' || cookie.name === '') continue;
+    if (seen.has(cookie.name)) duplicates.add(cookie.name);
+    seen.add(cookie.name);
+  }
+  return [...duplicates].sort();
 }
 
 /**
@@ -343,6 +365,10 @@ export function buildRequestContext(input) {
     cookieCount: described.length,
     httpOnlyCookieCount: described.filter((cookie) => cookie.httpOnly).length,
     partitionedCookieCount: described.filter((cookie) => cookie.partitioned).length,
+    // Non-empty means the header carries the same name twice and Bridge cannot
+    // reproduce Chrome's ordering inside one path length; `cookies` says which
+    // entry belongs to which partition.
+    duplicateCookieNames: findDuplicateCookieNames(cookies),
     cookies: described,
     userAgent: input.userAgent ?? null,
     userAgentSource: input.userAgentSource,

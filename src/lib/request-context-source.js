@@ -145,7 +145,6 @@ export function createRequestContextSource(options = {}) {
     // Partitioned (CHIPS) cookies are invisible to a `url`-only query, so the
     // partition has to be named — and named exactly, see `resolvePartitionKey`.
     const partition = resolvePartitionKey({
-      targetUrl: target.url,
       workTabUrl: workTab.url,
       topLevelSite: request.topLevelSite,
       hasCrossSiteAncestor: request.hasCrossSiteAncestor,
@@ -167,14 +166,15 @@ export function createRequestContextSource(options = {}) {
 
     const pageFacts = await readPageFacts(request.tabId);
 
-    // The page the facts came from must still be the page the cookies were read
-    // for. A mismatch is not an error the Service can act on — it is a race — so
-    // the caller retries once before giving up.
-    if (pageFacts?.pageUrl !== undefined && !isSameOrigin(pageFacts.pageUrl, workTab.url)) {
-      return { retry: true };
-    }
+    // The *document* the facts came from must be the document the cookies were read
+    // for. Comparing origins alone would accept a same-origin navigation
+    // (`/feed` → `/account`) and then answer with the old URL as the suggested
+    // Referer while the facts describe the new page. A mismatch is not an error the
+    // Service can act on — it is a race — so the caller retries once.
+    const factsPage = normalizeTargetUrl(pageFacts?.pageUrl);
+    if (factsPage.ok && factsPage.url !== workTab.url) return { retry: true };
     const after = await readWorkTabUrl(request.tabId);
-    if (!after.ok || !isSameOrigin(after.url, workTab.url)) return { retry: true };
+    if (!after.ok || after.url !== workTab.url) return { retry: true };
 
     const context = buildRequestContext({
       targetUrl: target.url,

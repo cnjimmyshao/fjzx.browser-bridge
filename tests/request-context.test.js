@@ -8,6 +8,7 @@ import {
   buildCookieHeader,
   buildRequestContext,
   describeCookies,
+  findDuplicateCookieNames,
   isSameOrigin,
   maskCookieHeader,
   mergeCookieSets,
@@ -152,44 +153,68 @@ test('normalizeTopLevelSite keeps the origin, and mergeCookieSets concatenates p
 
 test('resolvePartitionKey always names exactly one partition', () => {
   // No partition query at all when the caller opts out.
-  assert.deepEqual(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: null }), {
+  assert.deepEqual(resolvePartitionKey({ workTabUrl: WORK_TAB_URL, topLevelSite: null }), {
     ok: true,
     partitionKey: null,
   });
 
-  // Same-origin target: the page's own request is first-party to its site.
-  assert.deepEqual(resolvePartitionKey({ targetUrl: `${WORK_TAB_ORIGIN}/media/1`, workTabUrl: WORK_TAB_URL }), {
+  // The default describes a request the Work Tab's own document makes, and by
+  // design the top-level context is never a cross-site ancestor — whether or not
+  // the target is on another site. Deriving it from the target's site would get
+  // sibling subdomains and cross-site CDNs wrong in opposite directions.
+  assert.deepEqual(resolvePartitionKey({ workTabUrl: WORK_TAB_URL }), {
     ok: true,
     partitionKey: { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
   });
 
-  // Cross-origin target: a partitioned cookie for it can only have been set from
-  // a cross-site context, and `{topLevelSite, hasCrossSiteAncestor:false}` would be
-  // rejected by Chrome for a URL that is not first-party to the site.
-  assert.deepEqual(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL }), {
-    ok: true,
-    partitionKey: { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: true },
-  });
-
-  // An explicit bit wins, in both directions: the caller often knows the frame
-  // nesting better than the target URL does.
+  // A request made from a third-party frame carries the bit.
   assert.deepEqual(
-    resolvePartitionKey({ targetUrl: `${WORK_TAB_ORIGIN}/a`, workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: true }).partitionKey,
+    resolvePartitionKey({ workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: true }).partitionKey,
     { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: true },
   );
+  // An explicit false is honoured too (it is not nullish).
   assert.deepEqual(
-    resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: false }).partitionKey,
+    resolvePartitionKey({ workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: false }).partitionKey,
     { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
   );
 
   // An explicit site replaces the Work Tab default.
   assert.deepEqual(
-    resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'https://other.test/x' }).partitionKey,
-    { topLevelSite: 'https://other.test', hasCrossSiteAncestor: true },
+    resolvePartitionKey({ workTabUrl: WORK_TAB_URL, topLevelSite: 'https://other.test/x' }).partitionKey,
+    { topLevelSite: 'https://other.test', hasCrossSiteAncestor: false },
   );
 
-  assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: 'yes' }).ok, false);
-  assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'nope' }).ok, false);
+  assert.equal(resolvePartitionKey({ workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: 'yes' }).ok, false);
+  assert.equal(resolvePartitionKey({ workTabUrl: WORK_TAB_URL, topLevelSite: 'nope' }).ok, false);
+});
+
+test('duplicate cookie names are surfaced instead of silently ordered', () => {
+  // A partitioned cookie and an unpartitioned one are different cookies, so they
+  // can share a name and a path. Chrome sends both, ordered by path then creation
+  // time — and the API exposes no creation time, so within one path length the
+  // order cannot be reproduced. Saying so beats guessing.
+  const context = buildRequestContext({
+    targetUrl: 'https://cdn.test/media/1',
+    scope: TARGET_SCOPES.TARGET_ONLY,
+    workTabUrl: WORK_TAB_URL,
+    cookies: [
+      { name: 'sid', value: 'unpartitioned', path: '/' },
+      { name: 'sid', value: 'partitioned', path: '/', partitionKey: { topLevelSite: WORK_TAB_ORIGIN } },
+      { name: 'theme', value: 'dark', path: '/' },
+    ],
+    userAgent: 'UA/1.0',
+    userAgentSource: USER_AGENT_SOURCES.PAGE,
+    observedAt: '2026-01-01T00:00:00.000Z',
+  });
+
+  assert.equal(context.cookieHeader, 'sid=unpartitioned; sid=partitioned; theme=dark');
+  assert.deepEqual(context.duplicateCookieNames, ['sid']);
+  assert.equal(context.cookies.find((cookie) => cookie.value !== undefined), undefined, '元数据里没有值');
+  assert.deepEqual(context.cookies.map((cookie) => cookie.partitioned), [false, true, false]);
+
+  assert.deepEqual(findDuplicateCookieNames([{ name: 'a' }, { name: 'b' }]), []);
+  assert.deepEqual(findDuplicateCookieNames(undefined), []);
+  assert.deepEqual(findDuplicateCookieNames([{ name: 'a' }, { name: 'a' }, { name: 'b' }, { name: 'b' }]), ['a', 'b']);
 });
 
 test('buildRequestContext separates the suggested referer from the page-reported fact', () => {
@@ -360,9 +385,11 @@ test('partitioned cookies are merged in, and an explicit null skips the partitio
   assert.equal(named.ok, true);
   assert.deepEqual(stub.calls.getAll.at(-1).partitionKey, {
     topLevelSite: 'https://top.test',
-    hasCrossSiteAncestor: true,
+    hasCrossSiteAncestor: false,
   });
 
+  // A cross-site target keeps the top-level bit: the request still comes from the
+  // Work Tab's own document, and it is the caller that says otherwise.
   const crossOrigin = await source.read({
     tabId: 1,
     targetUrl: 'https://cdn.test/media/1',
@@ -371,7 +398,7 @@ test('partitioned cookies are merged in, and an explicit null skips the partitio
   assert.equal(crossOrigin.ok, true);
   assert.deepEqual(stub.calls.getAll.at(-1).partitionKey, {
     topLevelSite: WORK_TAB_ORIGIN,
-    hasCrossSiteAncestor: true,
+    hasCrossSiteAncestor: false,
   });
 });
 
@@ -437,7 +464,7 @@ test('a navigation during the sample is retried, and never answered with a mixtu
   // The partition follows the page the answer actually describes.
   assert.deepEqual(retried.calls.getAll.at(-1).partitionKey, {
     topLevelSite: 'https://moved.test',
-    hasCrossSiteAncestor: true,
+    hasCrossSiteAncestor: false,
   });
 
   // With the strict scope the same race ends in a refusal, not in a mixture: the

@@ -294,6 +294,6 @@ POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-e
 
 **权限**：新增 `cookies`（`cookies` 权限本身不新增安装警告）与 `scripting`（读 Work Tab 页面自己的 UA / referrer，worker 代答不了）。读取范围由 `chrome.cookies.getAll({ url })` 与 host 权限共同限制：**Bridge 从不用 `getAll({})` 或 `getAll({domain})`**。
 
-**实测约束**：HttpOnly 可读；SameSite 不影响读取；**分区（CHIPS）cookie 必须给出完整的分区键** —— 只有 `topLevelSite` 会同时命中 `hasCrossSiteAncestor` 的两种取值（两个分区都有同名 cookie 时会一起返回），因此 Bridge 总是补全这一位（默认由"目标是否 first-party"推导，可由请求覆盖）；UA 必须取自页面；一次采样必须来自同一个页面（中途导航会重试一次，仍不一致则报 `CONTEXT_FAILED`）；cookie 值不落盘也不进日志。
+**实测约束**：HttpOnly 可读；SameSite 不影响读取；**分区（CHIPS）cookie 必须给出完整的分区键** —— 只有 `topLevelSite` 会同时命中 `hasCrossSiteAncestor` 的两种取值（两个分区都有同名 cookie 时会一起返回），因此请求可以带 `hasCrossSiteAncestor`，默认 `false`（顶层文档自己发出的请求；这一位描述 frame 祖先链，不是目标的站点）；UA 必须取自页面；一次采样必须来自同一个**文档**（中途导航——包括同源换路径——会重试一次，仍不一致则报 `CONTEXT_FAILED`）；同名 cookie 无法复现 Chrome 在同一 path 长度内的创建时间顺序，实现用 `duplicateCookieNames` 显式报告冲突；cookie 值不落盘也不进日志。
 
 **验证**：`npm run poc:context`（= `node tests/poc/request-context.mjs`）在真实扩展上跑 15 个场景，含反例与"RUNNING 期间取上下文不影响 Job"；证据写在 `docs/research/evidence/request-context.json`。`npm run poc` 的 12 个 V1 场景不受影响。
