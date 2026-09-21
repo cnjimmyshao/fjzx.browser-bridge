@@ -407,12 +407,14 @@ function createStubChrome({
   denyTargetAccess = false,
   withPermissionsApi = true,
   grantedOrigins = null,
+  revokeAllUrlsAfterFirst = false,
   cookieStores = [{ id: '0', tabIds: [1] }],
   failCookieStores = false,
 } = {}) {
   const calls = { getAll: [], executeScript: [], get: [], contains: [], getAllCookieStores: [] };
   let tabReads = 0;
   let factReads = 0;
+  let allUrlsQueries = 0;
   const stub = {
     calls,
     cookies: {
@@ -454,6 +456,11 @@ function createStubChrome({
       async contains({ origins }) {
         calls.contains.push(origins);
         if (denyTargetAccess) return false;
+        if (origins[0] === '<all_urls>') {
+          allUrlsQueries += 1;
+          // Models an operator narrowing access while the reads are in flight.
+          if (revokeAllUrlsAfterFirst && allUrlsQueries > 1) return false;
+        }
         // `grantedOrigins` models a user who allowed some sites only; by default the
         // extension's `<all_urls>` grant answers yes to everything asked.
         if (grantedOrigins === null) return true;
@@ -759,7 +766,9 @@ test('withheld access to a cross-origin target is reported, not answered with an
     scope: TARGET_SCOPES.TARGET_ONLY,
   });
   assert.equal(allowed.ok, true);
-  assert.deepEqual(granted.calls.contains, [['<all_urls>']], '整块授权还在时不必再问别的');
+  // Asked once before the reads and once after them, so a revocation in between
+  // cannot leave a stale completeness claim.
+  assert.deepEqual(granted.calls.contains, [['<all_urls>'], ['<all_urls>']]);
   assert.equal(allowed.context.hostAccessCoverage, 'all');
 
   // Without the API the check is skipped rather than guessed, and the answer says so.
@@ -785,7 +794,13 @@ test('a narrower grant still answers, but marks the set as origin-only', async (
 
   assert.equal(outcome.ok, true);
   assert.equal(outcome.context.hostAccessCoverage, 'origin');
-  assert.deepEqual(stub.calls.contains, [['<all_urls>'], ['https://app.example.com/*']]);
+  // First check, then the same two questions again as the post-read revalidation.
+  assert.deepEqual(stub.calls.contains, [
+    ['<all_urls>'],
+    ['https://app.example.com/*'],
+    ['<all_urls>'],
+    ['https://app.example.com/*'],
+  ]);
 
   // The same narrow grant, but for a different origin: nothing is visible, so the
   // request is refused instead of answered with an empty header.
@@ -798,6 +813,23 @@ test('a narrower grant still answers, but marks the set as origin-only', async (
   assert.equal(refused.ok, false);
   assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
   assert.deepEqual(elsewhere.calls.getAll, []);
+});
+
+test('a coverage change during the reads is refused, not answered with a stale claim', async () => {
+  // The blanket grant is intact when the request starts and gone by the time the
+  // cookies have been read: `getAll` would have filtered silently, so the answer must
+  // not still say 'all'.
+  const stub = createStubChrome({
+    cookies: [{ name: 'sid', value: 's', path: '/' }],
+    revokeAllUrlsAfterFirst: true,
+  });
+  const refused = await createSource(stub).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+  assert.match(refused.message, /访问权限在采样期间发生了变化/);
+  // 第一次问整块授权、第二次复核它，第三次确认目标 origin 仍然可见。
+  assert.deepEqual(stub.calls.contains, [['<all_urls>'], ['<all_urls>'], ['https://app.test/*']]);
 });
 
 test('originMatchPattern drops the port, which match patterns do not support', () => {

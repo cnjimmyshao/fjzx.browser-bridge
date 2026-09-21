@@ -279,6 +279,8 @@ cookie: sid=…; theme=…; strict=…
 
 之所以不干脆拒绝 `origin` 这种情况：判断"是否存在父域 cookie"需要公共后缀表，而 Bridge 不携带 PSL、用"末两段标签"猜会在 `co.uk`、`github.io` 这类多段后缀上判错（`app.example.co.uk` 会被猜成 `*://*.co.uk/*`）。另外 match pattern **不支持端口**，所以模式必须由 scheme + hostname 组成（`https://example.com/*`），带上 `:8443` 会被 API 直接拒绝。目标 origin 完全不在授权范围内时才是硬拒绝（`CONTEXT_FAILED`）。
 
+这一段判定**前后各做一次**：读取 cookie 是异步的，如果期间用户收窄/撤销了访问权限，`getAll` 会静默过滤，而先前的 `all` 就成了对一份已被裁剪的集合的完整性声明——所以读取之后再确认一次覆盖范围，变了就拒绝（消息里说明"访问权限在采样期间发生了变化"）。
+
 失败（`ok:false`）沿用 V1 `RESULT.error` 的形状：`{ code, message }`。code 集合（`CONTEXT_ERROR_CODES`，与 V1 的 `ERROR_CODES` **分开**，不动后者）：
 
 | code | 含义 | 备注 |

@@ -301,6 +301,18 @@ export function createRequestContextSource(options = {}) {
     }
     const all = mergeCookieSets(unpartitioned, partitioned);
 
+    // Access can be revoked or narrowed while the reads are in flight. The answer
+    // must not then claim a coverage it no longer has — `getAll` would have filtered
+    // silently, so a stale `'all'` would be a completeness claim about a set that was
+    // already trimmed. Re-checking costs one call and turns that into a refusal.
+    const accessAfter = await readHostAccess(target.url);
+    if (!accessAfter.ok || accessAfter.coverage !== access.coverage) {
+      return fail(
+        CONTEXT_ERROR_CODES.CONTEXT_FAILED,
+        '目标站点的访问权限在采样期间发生了变化，无法保证 cookie 集合完整。',
+      );
+    }
+
     const facts = await readPageFacts(request.tabId);
     if (!facts.ok) return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `无法读取 Work Tab 页面：${facts.reason}`);
     const pageFacts = facts.facts;
