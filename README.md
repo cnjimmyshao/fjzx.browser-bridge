@@ -223,6 +223,18 @@ MV3 service worker **不是常驻进程**。实测（Chrome for Testing 153.0.80
 
 > 当前行为：worker 被唤醒时会重新读取 Service URL 并重连，因此 Options 页保存配置、浏览器启动等事件都会触发恢复。
 
+## 调研：受控 Request Context（issue #13）
+
+issue #13 的调研结论与可复现 POC **不改变 V1 契约**：
+
+- 调查报告：[docs/research/request-context-poc.md](docs/research/request-context-poc.md)（含最小 Protocol Draft `GET_REQUEST_CONTEXT`，**未声明为稳定契约**）
+- 调研笔记：`docs/research/notes/`（Cookie API、重放上下文、Bridge 差距、Service 侧需求、Node 重放忠实度）
+- POC：[poc/README.md](poc/README.md)，`node poc/service/run-poc.mjs` 用**独立的 POC 扩展** + 真实 Chrome for Testing 跑 27 项检查（含反例），证据写在 `poc/evidence/request-context.json`
+
+`src/` 仍是唯一的 V1 扩展根目录，协议、状态机与权限数组均未变动。
+
+> 与上面「从全新 checkout 跑通 POC」（`tests/poc/`，`npm run poc`）的区别：那个是 **V1 扩展的端到端 POC**，跑的是 `src/`；本目录是 **issue #13 的调研 POC**，跑的是一个独立的实验扩展，用来回答"浏览器允许交出什么上下文"。两者共用同一套零依赖 CDP 思路，是否合并成一份 harness 留待评审。
+
 ## 开发
 
 需要 Node >= 22（测试使用内置 `node:test` 与全局 `WebSocket`，无第三方依赖）。

@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Bridge Request-Context POC",
+  "version": "0.0.1",
+  "description": "POC only: return the minimal request context for a target URL. Not the V1 extension.",
+  "permissions": ["storage", "tabs", "cookies", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}
