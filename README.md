@@ -43,10 +43,42 @@ Bridge 当前状态：
 
 先完成最小 POC，验证：
 
-1. Extension Settings 保存 Service URL；
+1. ✅ Extension Settings 保存 Service URL；
 2. WebSocket 连接 Service；
 3. 自动识别唯一 Work Tab；
 4. 接收 EXECUTE；
 5. 使用 `chrome.userScripts.execute()` 在 USER_SCRIPT world 执行 JavaScript；
 6. 主动 Push RESULT；
 7. 支持 GET_STATUS / STATUS。
+
+## 仓库结构
+
+```text
+src/                      Extension 根目录，Chrome 直接加载此目录
+  manifest.json
+  lib/                    纯逻辑，不依赖 chrome.*，可在 Node 下直接测试
+  options/                Options 设置页
+tests/                    node:test 自动化测试
+docs/architecture-v1.md   V1 架构与协议
+```
+
+`src/` 就是 Extension 根目录，**没有打包步骤**：Chrome 直接加载 `src/`，因此 `tests/`、`docs/`、`package.json` 不会进入 Extension。
+
+## 开发
+
+需要 Node >= 20.11（测试使用内置 `node:test`，无第三方依赖）。
+
+```powershell
+npm test        # 等价于 node --test
+```
+
+> 若 PowerShell 执行策略阻止 `npm.ps1`，直接运行 `node --test`，或改用 `npm.cmd test`。
+
+加载 Extension：
+
+1. 打开 `chrome://extensions`，启用右上角「开发者模式」。
+2. 点击「加载已解压的扩展程序」，选择本仓库的 `src/` 目录。
+3. 在扩展卡片上点击「扩展程序选项」，填写 Service URL（形如 `ws://127.0.0.1:8080`）并保存。
+
+Service URL 是 V1 唯一的持久配置，保存在 `chrome.storage.local`。未配置时 Options 页明确显示"未配置"，不会写入任何隐式默认值。
+
