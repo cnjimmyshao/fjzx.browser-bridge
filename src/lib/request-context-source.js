@@ -38,6 +38,28 @@ import {
  * that is where the useful diagnostic is.
  */
 
+/** The Chrome version whose `CookiePartitionKey` gained `hasCrossSiteAncestor`. */
+export const ANCESTOR_BIT_MIN_CHROME = 130;
+
+/**
+ * Does this browser understand the ancestor bit?
+ *
+ * `hasCrossSiteAncestor` only exists from Chrome 130, and sending it to anything
+ * older makes `getAll` reject the query — including the ordinary reads of targets
+ * that have no partitioned cookies at all. The manifest deliberately keeps V1's own
+ * floor (user scripts need Chrome 120), so the capability degrades visibly here
+ * instead of turning every request into a failure: the bit is dropped and the answer
+ * reports `exactPartitionSelection: false`.
+ *
+ * An unparsable user agent is treated as "not supported": omitting the field works
+ * on every version, while sending it to an old browser breaks all reads.
+ */
+export function supportsAncestorBit(userAgent = globalThis.navigator?.userAgent ?? '') {
+  const match = /(?:Headless)?Chrome\/(\d+)/.exec(String(userAgent));
+  if (match === null) return false;
+  return Number(match[1]) >= ANCESTOR_BIT_MIN_CHROME;
+}
+
 /** Where the reported user agent came from. Part of the answer, not a detail. */
 export const USER_AGENT_SOURCES = Object.freeze({
   /** The Work Tab page's own navigator — the only source this module produces. */
@@ -87,6 +109,10 @@ function readPageFactsInPage() {
  */
 export function createRequestContextSource(options = {}) {
   const { logger = {} } = options;
+  // Injectable like the browser APIs: the version check reads the worker's own
+  // navigator, which a test can neither provide nor fake otherwise.
+  const ancestorBitSupport =
+    typeof options.ancestorBitSupport === 'function' ? options.ancestorBitSupport : () => supportsAncestorBit();
   const injected = ['cookies', 'tabs', 'scripting'].some((key) => Object.hasOwn(options, key));
 
   function resolveApis() {
@@ -220,11 +246,13 @@ export function createRequestContextSource(options = {}) {
 
     // Partitioned (CHIPS) cookies are invisible to a `url`-only query, so the
     // partition has to be named — and named exactly, see `resolvePartitionKey`.
+    const ancestorBit = ancestorBitSupport() === true;
     const partition = resolvePartitionKey({
       targetUrl: target.url,
       workTabUrl: workTab.url,
       topLevelSite: request.topLevelSite,
       hasCrossSiteAncestor: request.hasCrossSiteAncestor,
+      supportsAncestorBit: ancestorBit,
     });
     if (!partition.ok) return fail(CONTEXT_ERROR_CODES.INVALID_PARTITION, partition.reason);
 
@@ -283,6 +311,7 @@ export function createRequestContextSource(options = {}) {
       // Only a tie *between* the two queries is unreproducible; within one response
       // the API already returned Chrome's own order.
       duplicateCookieNames: findAmbiguousCookieNames({ unpartitioned, partitioned }),
+      exactPartitionSelection: partition.partitionKey === null || ancestorBit,
       userAgent: pageFacts.userAgent,
       userAgentSource: USER_AGENT_SOURCES.PAGE,
       observedAt: new Date().toISOString(),

@@ -226,7 +226,7 @@ cookie: sid=…; theme=…; strict=…
 | `targetUrl` | 是 | **原样含签名参数**、不含 fragment、http(s)、不得内嵌凭据；否则 `INVALID_TARGET_URL` |
 | `scope` | 否 | `WORK_TAB_ORIGIN`（默认，要求与 Work Tab 同源）或 `TARGET_ONLY`（显式允许跨源，但返回集合仍只含匹配该 URL 的 cookie）；其他值 → `INVALID_SCOPE`（不做静默降级） |
 | `topLevelSite` | 否 | CHIPS 分区键的站点部分。**不传时默认取 Work Tab 的 origin**（子资源的分区由顶层站点决定）；传 `null` 表示明确不要分区查询；传非法 URL → `INVALID_PARTITION` |
-| `hasCrossSiteAncestor` | 否 | CHIPS 分区键的**另一位**（Chrome 130+）。**只给 `topLevelSite` 会同时命中两种取值**：若两个分区都有同名 cookie，就会一起返回、甚至拼出错误的 `Cookie` 头。它表示"这次请求相对顶层站点是否跨站"，因此默认按两个 **schemeful site**（scheme + 可注册域，忽略端口）推导：同站（含 sibling 子域、不同端口）→ `false`，跨站 → `true`。Bridge 不携带公共后缀表，"可注册域"用"末两段标签"近似，对多段公共后缀（如 `a.co.uk`）会判错——这类情况请**显式**传值；显式值永远优先。非 boolean → `INVALID_PARTITION` |
+| `hasCrossSiteAncestor` | 否 | CHIPS 分区键的**另一位**（Chrome 130+，见下）。**只给 `topLevelSite` 会同时命中两种取值**：若两个分区都有同名 cookie，就会一起返回、甚至拼出错误的 `Cookie` 头。它表示"这次请求相对顶层站点是否跨站"，因此默认按两个 **schemeful site**（scheme + 可注册域，忽略端口）推导：同站（含 sibling 子域、不同端口）→ `false`，跨站 → `true`。Bridge 不携带公共后缀表，"可注册域"用"末两段标签"近似，对多段公共后缀（如 `a.co.uk`）会判错——这类情况请**显式**传值；显式值永远优先。非 boolean → `INVALID_PARTITION` |
 
 ### 8.2 响应：`REQUEST_CONTEXT`
 
@@ -244,6 +244,7 @@ cookie: sid=…; theme=…; strict=…
     "cookieCount": 2,
     "httpOnlyCookieCount": 1,
     "partitionedCookieCount": 0,
+    "exactPartitionSelection": true,
     "duplicateCookieNames": [],
     "cookies": [
       { "name": "sid", "domain": "cdn.example.test", "path": "/", "secure": true,
@@ -264,6 +265,8 @@ cookie: sid=…; theme=…; strict=…
 `referer` 是 Bridge 的**建议值**；`documentReferrer` 是页面自陈的**事实**（Chrome 153 上 `referrerPolicy` 恒为 `null`，见 [§7.4](#74-两个被-poc-纠正的实现细节)）。把两者分开返回，是为了不在 Bridge 里替 Service 判断"真实的发起页是谁"。
 
 `duplicateCookieNames` 非空表示 `cookieHeader` 里的同名并列**跨了两次查询**（非分区查询与分区查询），因此顺序由 Bridge 决定、而不是 Chrome 决定的。分区与非分区是两份 cookie，可以同名同 path，浏览器会把两份都发；`chrome.cookies` 不暴露创建时间，合并两个响应时相对顺序就丢了。**同一次查询内部**的顺序是 API 按浏览器发送顺序返回的（实测），稳定排序会保留，所以那类重名（例如两个域上都叫 `sid`）**不会**进这个字段；path 长度不同的重名也不会（长度本身就决定了顺序）。另外，Chrome 可能持有形如 `=value` 的**无名 cookie**：它同样会被保留在 `cookieHeader` 与元数据里，不会被静默丢掉。
+
+`exactPartitionSelection` 为 `false` 表示**浏览器版本低于 130**：`hasCrossSiteAncestor` 这个字段还不存在，发过去会让 `getAll` 拒绝整条查询（连"根本没有分区 cookie 的目标"也会一起失败）。因此实现按版本降级——不加这一位、只按顶层站点取分区，并把这个事实显式写在响应里。manifest **没有**为此抬高 `minimum_chrome_version`：V1 本身的底线是 `userScripts`（Chrome 120），不该被一个实验能力连坐。
 
 失败（`ok:false`）沿用 V1 `RESULT.error` 的形状：`{ code, message }`。code 集合（`CONTEXT_ERROR_CODES`，与 V1 的 `ERROR_CODES` **分开**，不动后者）：
 
@@ -317,7 +320,8 @@ cookie: sid=…; theme=…; strict=…
 10. **页面读不到就是失败，不会降级**：若用户限制了扩展对该站点的访问，`chrome.scripting` 会拒绝执行——而此时 `chrome.cookies` 也在静默过滤，所以实现直接返回 `CONTEXT_FAILED`，而不是回退到 worker 自己的 UA 交出一份"看起来完整"的上下文。
 11. **采样期间绑定变化会被拦下**：读取是异步的，期间出现第二个普通 Tab 会让 Bridge 变成 `MULTIPLE_TABS`；实现会先等 Work Tab 的当前快照（`settled()`）再复验绑定，变化时返回 `NOT_READY`，而不是继续披露按旧绑定采到的上下文。
 12. **隐身窗口要走对的 cookie store**：扩展在隐身模式下启用时，隐身 Tab 有自己的 store；不传 `storeId` 的 `getAll` 会读到普通 profile 的 store（既漏掉隐身会话，又可能把普通 profile 的 cookie 交出去）。实现用 `getAllCookieStores()` 按 `tabId` 解析 store 并显式传入；没有任何 store 认领该 Tab 时退回默认 store（不猜）。
-13. **需求侧证据显示当前用不上 Cookie**（[04](notes/04-service-side-need.md)）：`pr-douyin` 不发 Cookie 也能下四类媒体；`media_fetch_http_403`（9/416）的成因未知。**在拿到真实失败复现之前，扩大权限面的收益无法证明。**
+13. **Chrome < 130 要降级而不是报错**：`hasCrossSiteAncestor` 是 Chrome 130 才有的字段，旧版上带上它会让每次读取都失败（包括没有分区 cookie 的目标）。实现按版本降级为"只按顶层站点取分区"，并在响应里用 `exactPartitionSelection: false` 明说；manifest 不为这个实验能力抬高 V1 的版本底线。
+14. **需求侧证据显示当前用不上 Cookie**（[04](notes/04-service-side-need.md)）：`pr-douyin` 不发 Cookie 也能下四类媒体；`media_fetch_http_403`（9/416）的成因未知。**在拿到真实失败复现之前，扩大权限面的收益无法证明。**
 
 ---
 

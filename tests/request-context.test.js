@@ -18,7 +18,7 @@ import {
   normalizeTopLevelSite,
   resolvePartitionKey,
 } from '../src/lib/request-context.js';
-import { USER_AGENT_SOURCES, createRequestContextSource } from '../src/lib/request-context-source.js';
+import { USER_AGENT_SOURCES, createRequestContextSource, supportsAncestorBit } from '../src/lib/request-context-source.js';
 import { parseServiceMessage } from '../src/lib/protocol.js';
 
 /**
@@ -305,6 +305,29 @@ test('resolvePartitionKey always names exactly one partition', () => {
     false,
   );
   assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'nope' }).ok, false);
+
+  // A browser older than the bit (Chrome < 130) gets a site-only key rather than a
+  // query the API would reject — including for targets with no partitioned cookies.
+  assert.deepEqual(
+    resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, supportsAncestorBit: false }).partitionKey,
+    { topLevelSite: WORK_TAB_ORIGIN },
+  );
+  assert.deepEqual(
+    resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: null, supportsAncestorBit: false }),
+    { ok: true, partitionKey: null },
+  );
+});
+
+test('the ancestor bit is only sent to browsers that have it', () => {
+  assert.equal(supportsAncestorBit('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36'), true);
+  assert.equal(supportsAncestorBit('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36'), true);
+  assert.equal(supportsAncestorBit('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'), true);
+  assert.equal(supportsAncestorBit('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'), false);
+  assert.equal(supportsAncestorBit('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'), false);
+  // Unknown is treated as unsupported: leaving the field out works everywhere,
+  // sending it to an old browser breaks every read.
+  assert.equal(supportsAncestorBit('something else'), false);
+  assert.equal(supportsAncestorBit(''), false);
 });
 
 test('isSameSite compares scheme and registrable host, not origins', () => {
@@ -435,12 +458,14 @@ function createStubChrome({
   return stub;
 }
 
-function createSource(stub) {
+/** The POC runs on modern Chrome, so the ancestor bit is available unless a test says otherwise. */
+function createSource(stub, { ancestorBitSupport = () => true } = {}) {
   return createRequestContextSource({
     cookies: stub.cookies,
     tabs: stub.tabs,
     scripting: stub.scripting,
     ...(stub.permissions === undefined ? {} : { permissions: stub.permissions }),
+    ancestorBitSupport,
     logger: {},
   });
 }
@@ -640,6 +665,30 @@ test('a name shared across the two queries is reported as ambiguous', async () =
   const single = createStubChrome({ cookies: [{ name: 'sid', value: 'only', path: '/' }] });
   const alone = await createSource(single).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
   assert.deepEqual(alone.context.duplicateCookieNames, []);
+});
+
+test('a browser without the ancestor bit still gets a context, marked as site-only', async () => {
+  // Chrome 119–129 would reject the whole query for an unsupported field — including
+  // reads of targets that have no partitioned cookies at all — so the bit is left out
+  // there and the answer says the partition was chosen by site alone.
+  const stub = createStubChrome({ cookies: [{ name: 'sid', value: 's', path: '/' }] });
+  const outcome = await createSource(stub, { ancestorBitSupport: () => false }).read({
+    tabId: 1,
+    targetUrl: `${WORK_TAB_ORIGIN}/media/1`,
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(stub.calls.getAll[1].partitionKey, { topLevelSite: WORK_TAB_ORIGIN });
+  assert.equal(outcome.context.exactPartitionSelection, false);
+
+  // On a supported browser the bit is present and the answer says the partition is exact.
+  const modern = createStubChrome({ cookies: [{ name: 'sid', value: 's', path: '/' }] });
+  const exact = await createSource(modern).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  assert.deepEqual(modern.calls.getAll[1].partitionKey, {
+    topLevelSite: WORK_TAB_ORIGIN,
+    hasCrossSiteAncestor: false,
+  });
+  assert.equal(exact.context.exactPartitionSelection, true);
 });
 
 test('reads the cookie store the Work Tab actually lives in', async () => {

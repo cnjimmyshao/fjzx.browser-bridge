@@ -240,6 +240,7 @@ export function isSameSite(a, b) {
  *   workTabUrl: string,
  *   topLevelSite?: unknown,
  *   hasCrossSiteAncestor?: unknown,
+ *   supportsAncestorBit?: boolean,
  * }} input
  * @returns {{ok: true, partitionKey: object | null} | {ok: false, reason: string}}
  */
@@ -257,12 +258,20 @@ export function resolvePartitionKey(input) {
   );
   if (!site.ok) return { ok: false, reason: site.reason };
 
+  const topLevelSite = site.topLevelSite;
+
+  // The bit itself only exists from Chrome 130. On anything older the field would
+  // make `getAll` reject the whole query — including the ordinary reads of targets
+  // that have no partitioned cookies at all — so it is left out there and the answer
+  // says the partition was chosen by site only.
+  if (input.supportsAncestorBit === false) return { ok: true, partitionKey: { topLevelSite } };
+
   return {
     ok: true,
     partitionKey: {
-      topLevelSite: site.topLevelSite,
+      topLevelSite,
       hasCrossSiteAncestor:
-        input.hasCrossSiteAncestor ?? !isSameSite(input.targetUrl, site.topLevelSite),
+        input.hasCrossSiteAncestor ?? !isSameSite(input.targetUrl, topLevelSite),
     },
   };
 }
@@ -416,6 +425,7 @@ export function describeErrorKind(error) {
  *   documentReferrer?: string | null,
  *   referrerPolicy?: string | null,
  *   duplicateCookieNames?: string[],
+ *   exactPartitionSelection?: boolean,
  *   serviceWorkerUserAgent?: string | null,
  * }} input
  */
@@ -435,6 +445,10 @@ export function buildRequestContext(input) {
     cookieCount: described.length,
     httpOnlyCookieCount: described.filter((cookie) => cookie.httpOnly).length,
     partitionedCookieCount: described.filter((cookie) => cookie.partitioned).length,
+    // False means the browser is older than the ancestor bit (Chrome 130) and the
+    // partition was chosen by top-level site alone: the set may contain cookies from
+    // both partitions instead of exactly one.
+    exactPartitionSelection: input.exactPartitionSelection !== false,
     // Non-empty means the header carries the same name twice in a way Bridge cannot
     // order (the merge of two queries); `cookies` says which entry belongs to which
     // partition. Computed by the caller, which is where the two query results exist.
