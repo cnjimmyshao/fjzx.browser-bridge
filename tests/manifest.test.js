@@ -18,10 +18,13 @@ test('manifest is valid JSON and declares Manifest V3', () => {
 });
 
 test('permissions stay at the minimum V1 needs', () => {
-  // `storage` is all V1.1 requires: the single Service URL. Any later issue that
-  // genuinely needs another permission must update this list deliberately, so
-  // permission creep shows up as a reviewed diff instead of slipping in.
-  assert.deepEqual(manifest.permissions, ['storage']);
+  // Every addition must be deliberate, so permission creep shows up as a reviewed
+  // diff instead of slipping in:
+  //   storage — the single Service URL (V1.1)
+  //   tabs    — `tab.url` is redacted without it, and identifying the one
+  //             ordinary web tab means reading that tab's scheme (V1.3). It
+  //             grants no page-content access and no host permission.
+  assert.deepEqual(manifest.permissions, ['storage', 'tabs']);
 });
 
 test('no host permissions are requested', () => {
