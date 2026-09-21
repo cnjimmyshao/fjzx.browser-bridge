@@ -184,7 +184,9 @@ function checkJsonCompatible(value, path) {
       return true;
     case 'number':
       // NaN and Infinity have no JSON spelling; they would silently become null.
-      return Number.isFinite(value);
+      // -0 does have one, but not through JSON.stringify, which emits 0 — so it is
+      // refused rather than quietly normalized.
+      return Number.isFinite(value) && !Object.is(value, -0);
     case 'object':
       break;
     default:
@@ -196,15 +198,28 @@ function checkJsonCompatible(value, path) {
   path.add(value);
   try {
     if (Array.isArray(value)) {
-      // JSON keeps the canonical indices and nothing else, so a hole, a stray
-      // property, a symbol key — or a `toJSON` that JSON.stringify would call
-      // instead of reading the array — all change the value on the way out.
-      if (Object.keys(value).length !== value.length) return false;
+      // JSON keeps exactly the canonical indices below `length`, so anything else
+      // — a hole, a key like `4294967295`, a named property, a symbol key, a
+      // non-enumerable index, or a `toJSON` that JSON.stringify would call instead
+      // of reading the array — changes the value on the way out.
+      const indices = [];
+      for (let index = 0; index < value.length; index += 1) indices.push(String(index));
+
+      const expected = new Set(['length', ...indices]);
       for (const key of Reflect.ownKeys(value)) {
-        if (key === 'length') continue;
-        if (typeof key !== 'string' || !/^(0|[1-9]\d*)$/.test(key)) return false;
+        if (typeof key !== 'string' || !expected.has(key)) return false;
       }
-      return value.every((item) => checkJsonCompatible(item, path));
+
+      for (const index of indices) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, index);
+        if (descriptor === undefined) return false; // a hole
+        if (!descriptor.enumerable) return false;
+        // An accessor could yield a different value when it is read again during
+        // serialization — or throw, after the Job has already been cleared.
+        if (descriptor.get !== undefined || descriptor.set !== undefined) return false;
+        if (!checkJsonCompatible(descriptor.value, path)) return false;
+      }
+      return true;
     }
 
     const prototype = Object.getPrototypeOf(value);

@@ -460,14 +460,25 @@ test('a tab replacement is never recorded as a closure', async () => {
   const manager = createWorkTabManager({ tabs: fake.api, binding });
 
   await manager.refresh('worker-start');
-  // Even when the follow-up query fails, a replacement is not a closure.
+  // Even when the follow-up query fails - which fails closed and stops claiming a
+  // binding - a replacement must not be mistaken for the Work Tab being closed.
   fake.failQueries();
   await fake.replaceTab(web(2, 'https://a.test/'), 1);
   await settle();
 
-  assert.equal(manager.tabId, 2, '身份应转移到新 id');
-  assert.equal(manager.reason, null, '替换不是关闭');
+  assert.notEqual(manager.reason, WORK_TAB_REASONS.WORK_TAB_CLOSED, '替换不是关闭');
   assert.equal(binding.writes.at(-1).boundTabWasClosed, false);
+});
+
+test('a replacement that can be evaluated keeps the identity on the new id', async () => {
+  const fake = createFakeTabs([web(1, 'https://a.test/')]);
+  const manager = createWorkTabManager({ tabs: fake.api });
+
+  await manager.refresh('worker-start');
+  await fake.replaceTab(web(2, 'https://a.test/'), 1);
+
+  assert.equal(manager.tabId, 2, '身份应转移到新 id');
+  assert.equal(manager.reason, null);
 });
 
 test('binding writes are serialized so an older snapshot cannot land last', async () => {
@@ -575,6 +586,24 @@ test('settled() resolves immediately when nothing is in flight', async () => {
   await manager.refresh('worker-start');
 
   await assert.doesNotReject(() => manager.settled());
+});
+
+test('a failing query stops Bridge claiming a Work Tab it cannot vouch for', async () => {
+  const fake = createFakeTabs([web(3)]);
+  const recorder = createRecorder();
+  const manager = createWorkTabManager({ tabs: fake.api, onChange: recorder.onChange });
+
+  await manager.refresh('worker-start');
+  assert.equal(manager.tabId, 3);
+
+  // A second ordinary tab may have appeared; the query that would have shown it
+  // fails, so the only safe answer is "not bound".
+  fake.failQueries();
+  await fake.emitCreated(web(4));
+
+  assert.equal(manager.tabId, null, '查询失败后不得继续声称已绑定');
+  assert.equal(manager.isBound, false);
+  assert.equal(recorder.seen.at(-1).tabId, null);
 });
 
 test('settled() resolves after a failing query rather than blocking forever', async () => {

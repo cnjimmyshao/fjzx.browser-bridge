@@ -30,8 +30,19 @@ export const BRIDGE_STATES = Object.freeze({
   NOT_READY: 'NOT_READY',
 });
 
+/**
+ * Describe a rejection value without ever throwing.
+ *
+ * A value can carry a `Symbol.toPrimitive` that throws itself, and an escape from
+ * here would leave the Job registered — Bridge would answer every later EXECUTE
+ * with BUSY and never deliver this one's RESULT.
+ */
 function describeError(error) {
-  return error instanceof Error ? error.message : String(error);
+  try {
+    return error instanceof Error ? error.message : String(error);
+  } catch {
+    return '（无法描述的失败值）';
+  }
 }
 
 /**

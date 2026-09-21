@@ -186,6 +186,7 @@ test('refuses values JSON.stringify would silently rewrite', () => {
     ['NaN', Number.NaN],
     ['Infinity', Number.POSITIVE_INFINITY],
     ['-Infinity', Number.NEGATIVE_INFINITY],
+    ['negative zero', -0],
     ['undefined', undefined],
     ['a function', () => {}],
     ['a symbol', Symbol('s')],
@@ -269,6 +270,44 @@ test('refuses array own properties JSON would ignore or call', () => {
 
   assert.equal(isJsonCompatible([1, 2]), true);
   assert.equal(isJsonCompatible([]), true);
+});
+
+test('refuses array keys that are not indices inside the length', () => {
+  // 4294967295 is a legal property name but not an array index, so it satisfies a
+  // naive key count while JSON drops it and fills the hole with null.
+  const outsideLength = new Array(1);
+  outsideLength['4294967295'] = 'extra';
+  assert.equal(isJsonCompatible(outsideLength), false);
+
+  const nonCanonical = [1];
+  nonCanonical['01'] = 'x';
+  assert.equal(isJsonCompatible(nonCanonical), false);
+
+  const hiddenIndex = [1];
+  Object.defineProperty(hiddenIndex, '0', { value: 1, enumerable: false });
+  assert.equal(isJsonCompatible(hiddenIndex), false);
+
+  assert.equal(isJsonCompatible(new Array(0)), true);
+});
+
+test('refuses accessor-backed array elements', () => {
+  let reads = 0;
+  const shifty = [];
+  Object.defineProperty(shifty, '0', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      reads += 1;
+      return reads === 1 ? 'first' : 'second';
+    },
+  });
+  shifty.length = 1;
+  assert.equal(isJsonCompatible(shifty), false);
+
+  const nested = [{ get value() { return 1; } }];
+  assert.equal(isJsonCompatible(nested), false, '嵌套数组元素同样检查');
+
+  assert.equal(isJsonCompatible([{ value: 1 }]), true);
 });
 
 test('refuses accessor properties, which can differ between reads', () => {

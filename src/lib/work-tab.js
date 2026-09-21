@@ -191,6 +191,18 @@ export function createWorkTabTracker(options = {}) {
     },
 
     /**
+     * Drop the binding without touching the remembered id.
+     *
+     * Used when an evaluation could not establish the tab list: Bridge must not
+     * keep claiming a Work Tab it can no longer vouch for, and the remembered id
+     * is still what tells a later successful query whether that tab was closed.
+     */
+    invalidate() {
+      tabId = null;
+      if (reason === null) reason = WORK_TAB_REASONS.NO_WORK_TAB;
+    },
+
+    /**
      * A tab was replaced by another tab id (prerendering or Instant). The logical
      * tab was not closed, so its identity is transferred rather than released.
      *
@@ -330,8 +342,12 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
         found = await tabs.query({});
       } catch (error) {
         logger.warn?.('[bridge] failed to list tabs', error);
-        // The current state is published and persisted either way: it may already
-        // have been changed synchronously by the event that triggered this refresh.
+        // Fail closed. The tab set could not be established, so Bridge must stop
+        // claiming a Work Tab: the event that triggered this refresh may well have
+        // been a second ordinary tab appearing, and running a Job against an
+        // ambiguous profile is worse than reporting NOT_READY until a query
+        // succeeds again.
+        tracker.invalidate();
         publish(trigger);
         persist();
         return;

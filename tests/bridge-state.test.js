@@ -446,6 +446,37 @@ test('a value whose inspection throws fails the Job instead of stranding it', as
   });
 });
 
+test('a rejection value that cannot even be described still clears the Job', async () => {
+  const h = createHarness();
+  const handling = h.bridge.handleMessage(execute('job-22'));
+  await flush();
+
+  // `String(value)` throws here, so describing the failure is itself a hazard on
+  // the path that is supposed to recover from it.
+  const hostile = {
+    [Symbol.toPrimitive]() {
+      throw new Error('cannot describe me');
+    },
+  };
+  await h.executor.fail(hostile);
+  await handling;
+
+  assert.equal(h.connection.sent[0].ok, false);
+  assert.equal(h.connection.sent[0].error.code, ERROR_CODES.SCRIPT_EXECUTION_FAILED);
+  assert.equal(h.bridge.state, BRIDGE_STATES.IDLE, 'Bridge 不得滞留在 RUNNING');
+
+  const next = h.bridge.handleMessage(execute('job-23'));
+  await flush();
+  await h.executor.settle('fine');
+  await next;
+  assert.deepEqual(h.connection.sent.at(-1), {
+    type: 'RESULT',
+    jobId: 'job-23',
+    ok: true,
+    data: 'fine',
+  });
+});
+
 test('a RESULT is not delivered to a Service that did not submit the Job', async () => {
   const h = createHarness();
   const handling = h.bridge.handleMessage(execute('job-13'));

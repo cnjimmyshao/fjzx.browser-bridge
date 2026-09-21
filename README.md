@@ -60,7 +60,7 @@ Bridge 当前状态：
 | Service → Bridge | `EXECUTE`、`GET_STATUS` |
 | Bridge → Service | `RESULT`、`STATUS` |
 
-- `EXECUTE` 必填 `jobId`（非空字符串）与 `script`（字符串）；`input` / `metadata` 可选且**原样带过、从不解释**。
+- `EXECUTE` 必填 `jobId`（非空字符串）与 `script`（字符串）；`input` 可选，会**原样交给脚本**；`metadata` 可选，Bridge **只接收、不解释、也不转发**（V1 的 `RESULT` 里没有它的位置）。给这两者赋予含义就等于把 Service 的业务语义搬进 Bridge。
 - `RESULT` 为 `ok:true/data` 或 `ok:false/error`，`jobId` 与请求完全一致；error code 只有 `BUSY` / `NOT_READY` / `SCRIPT_EXECUTION_FAILED`。
 - `STATUS` 按状态带最少字段：`IDLE` 只有 state，`RUNNING` 附 `jobId`，`NOT_READY` 附 `reason`。
 
