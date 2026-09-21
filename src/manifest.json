@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "description": "Generic, site-agnostic browser bridge. Runs Service-provided JavaScript in a single Work Tab and returns the technical result.",
   "permissions": ["storage"],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
   "options_ui": {
     "page": "options/options.html",
     "open_in_tab": true

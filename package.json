@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Generic, site-agnostic Chrome Browser Bridge (Manifest V3 extension).",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22"
   },
   "scripts": {
     "test": "node --test"
