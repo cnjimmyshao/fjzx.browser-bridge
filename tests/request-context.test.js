@@ -8,7 +8,7 @@ import {
   buildCookieHeader,
   buildRequestContext,
   describeCookies,
-  findDuplicateCookieNames,
+  findAmbiguousCookieNames,
   isSameOrigin,
   isSameSite,
   maskCookieHeader,
@@ -109,9 +109,9 @@ test('buildCookieHeader is total, keeps nameless cookies, and never invents a va
 
 test('duplicate cookie names are surfaced instead of silently ordered', () => {
   // A partitioned cookie and an unpartitioned one are different cookies, so they
-  // can share a name and a path. Chrome sends both, ordered by path length and then
-  // creation time — and the API exposes no creation time, so a tie within one path
-  // length cannot be reproduced. Saying so beats guessing.
+  // can share a name and a path; both match a request and Chrome sends both, ordered
+  // by path length then creation time — which the API does not expose. What the
+  // *merge* loses is the relative order between the two responses, and only that.
   const context = buildRequestContext({
     targetUrl: 'https://cdn.test/media/1',
     scope: TARGET_SCOPES.TARGET_ONLY,
@@ -121,6 +121,10 @@ test('duplicate cookie names are surfaced instead of silently ordered', () => {
       { name: 'sid', value: 'partitioned', path: '/', partitionKey: { topLevelSite: WORK_TAB_ORIGIN } },
       { name: 'theme', value: 'dark', path: '/' },
     ],
+    duplicateCookieNames: findAmbiguousCookieNames({
+      unpartitioned: [{ name: 'sid', path: '/' }, { name: 'theme', path: '/' }],
+      partitioned: [{ name: 'sid', path: '/' }],
+    }),
     userAgent: 'UA/1.0',
     userAgentSource: USER_AGENT_SOURCES.PAGE,
     observedAt: '2026-01-01T00:00:00.000Z',
@@ -131,21 +135,69 @@ test('duplicate cookie names are surfaced instead of silently ordered', () => {
   assert.equal(context.cookies.find((cookie) => cookie.value !== undefined), undefined, '元数据里没有值');
   assert.deepEqual(context.cookies.map((cookie) => cookie.partitioned), [false, true, false]);
 
-  assert.deepEqual(findDuplicateCookieNames([{ name: 'a' }, { name: 'b' }]), []);
-  assert.deepEqual(findDuplicateCookieNames(undefined), []);
+  // Without a computed ambiguity the field stays empty rather than guessed.
   assert.deepEqual(
-    findDuplicateCookieNames([{ name: 'a', path: '/' }, { name: 'a', path: '/' }, { name: 'b', path: '/' }, { name: 'b', path: '/x' }]),
-    ['a'],
-  );
-  // A repeated name at *different* path lengths is ordered deterministically
-  // (longest path first), so it is not ambiguous and must not be reported.
-  assert.deepEqual(
-    findDuplicateCookieNames([
-      { name: 'sid', path: '/media' },
-      { name: 'sid', path: '/' },
-      { name: 'sid', path: '/deep/media' },
-    ]),
+    buildRequestContext({
+      targetUrl: 'https://cdn.test/media/1',
+      scope: TARGET_SCOPES.TARGET_ONLY,
+      workTabUrl: WORK_TAB_URL,
+      cookies: [{ name: 'sid', value: 'v', path: '/' }],
+      userAgent: 'UA/1.0',
+      userAgentSource: USER_AGENT_SOURCES.PAGE,
+      observedAt: '2026-01-01T00:00:00.000Z',
+    }).duplicateCookieNames,
     [],
+  );
+});
+
+test('findAmbiguousCookieNames only reports ties between the two queries', () => {
+  // Within one `getAll` response the API returns Chrome's own order and the stable
+  // sort keeps it, so a repeated name from a single query — two matching domains
+  // carrying the same name, say — is not ambiguous.
+  assert.deepEqual(
+    findAmbiguousCookieNames({
+      unpartitioned: [
+        { name: 'sid', path: '/' },
+        { name: 'sid', path: '/' },
+      ],
+      partitioned: [],
+    }),
+    [],
+  );
+
+  // Across the two responses the relative order is lost: that is the ambiguous case.
+  assert.deepEqual(
+    findAmbiguousCookieNames({
+      unpartitioned: [{ name: 'sid', path: '/' }],
+      partitioned: [{ name: 'sid', path: '/' }],
+    }),
+    ['sid'],
+  );
+
+  // Different path lengths are ordered deterministically (longest first) in either
+  // response, so they are never a tie — even across the two.
+  assert.deepEqual(
+    findAmbiguousCookieNames({
+      unpartitioned: [
+        { name: 'sid', path: '/media' },
+        { name: 'sid', path: '/' },
+      ],
+      partitioned: [{ name: 'sid', path: '/deep/media' }],
+    }),
+    [],
+  );
+
+  // A partition query that was skipped (or returned nothing) cannot create a tie.
+  assert.deepEqual(findAmbiguousCookieNames({ unpartitioned: [{ name: 'sid', path: '/' }] }), []);
+  assert.deepEqual(findAmbiguousCookieNames(), []);
+
+  // Same length, different path: still a tie, because only the length orders them.
+  assert.deepEqual(
+    findAmbiguousCookieNames({
+      unpartitioned: [{ name: 'sid', path: '/aa' }],
+      partitioned: [{ name: 'sid', path: '/bb' }],
+    }),
+    ['sid'],
   );
 });
 
@@ -267,47 +319,6 @@ test('isSameSite compares scheme and registrable host, not origins', () => {
   assert.equal(isSameSite('https://a.co.uk/x', 'https://b.co.uk/y'), true);
 });
 
-test('duplicate cookie names are surfaced instead of silently ordered', () => {
-  // A partitioned cookie and an unpartitioned one are different cookies, so they
-  // can share a name and a path. Chrome sends both, ordered by path length and then
-  // creation time — and the API exposes no creation time, so a tie within one path
-  // length cannot be reproduced. Saying so beats guessing.
-  const context = buildRequestContext({
-    targetUrl: 'https://cdn.test/media/1',
-    scope: TARGET_SCOPES.TARGET_ONLY,
-    workTabUrl: WORK_TAB_URL,
-    cookies: [
-      { name: 'sid', value: 'unpartitioned', path: '/' },
-      { name: 'sid', value: 'partitioned', path: '/', partitionKey: { topLevelSite: WORK_TAB_ORIGIN } },
-      { name: 'theme', value: 'dark', path: '/' },
-    ],
-    userAgent: 'UA/1.0',
-    userAgentSource: USER_AGENT_SOURCES.PAGE,
-    observedAt: '2026-01-01T00:00:00.000Z',
-  });
-
-  assert.equal(context.cookieHeader, 'sid=unpartitioned; sid=partitioned; theme=dark');
-  assert.deepEqual(context.duplicateCookieNames, ['sid']);
-  assert.equal(context.cookies.find((cookie) => cookie.value !== undefined), undefined, '元数据里没有值');
-  assert.deepEqual(context.cookies.map((cookie) => cookie.partitioned), [false, true, false]);
-
-  assert.deepEqual(findDuplicateCookieNames([{ name: 'a' }, { name: 'b' }]), []);
-  assert.deepEqual(findDuplicateCookieNames(undefined), []);
-  assert.deepEqual(
-    findDuplicateCookieNames([{ name: 'a', path: '/' }, { name: 'a', path: '/' }, { name: 'b', path: '/' }, { name: 'b', path: '/x' }]),
-    ['a'],
-  );
-  // A repeated name at *different* path lengths is ordered deterministically
-  // (longest path first), so it is not ambiguous and must not be reported.
-  assert.deepEqual(
-    findDuplicateCookieNames([
-      { name: 'sid', path: '/media' },
-      { name: 'sid', path: '/' },
-      { name: 'sid', path: '/deep/media' },
-    ]),
-    [],
-  );
-});
 
 test('buildRequestContext separates the suggested referer from the page-reported fact', () => {
   const context = buildRequestContext({
@@ -611,6 +622,26 @@ test('a navigation during the sample is retried, and never answered with a mixtu
   assert.match(mixed.message, /导航/);
 });
 
+test('a name shared across the two queries is reported as ambiguous', async () => {
+  // Two `getAll` responses are merged, and only the merge loses ordering: the same
+  // name and path length in both means the header's order is Bridge's choice, not
+  // Chrome's. Within one response the API's order is kept, so that case is silent.
+  const stub = createStubChrome({
+    cookies: [{ name: 'sid', value: 'unpartitioned', path: '/' }],
+    partitioned: [{ name: 'sid', value: 'partitioned', path: '/', partitionKey: { topLevelSite: WORK_TAB_ORIGIN } }],
+  });
+  const outcome = await createSource(stub).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.context.cookieHeader, 'sid=unpartitioned; sid=partitioned');
+  assert.deepEqual(outcome.context.duplicateCookieNames, ['sid']);
+
+  // Only one of the two queries returned it: no tie, nothing to report.
+  const single = createStubChrome({ cookies: [{ name: 'sid', value: 'only', path: '/' }] });
+  const alone = await createSource(single).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  assert.deepEqual(alone.context.duplicateCookieNames, []);
+});
+
 test('reads the cookie store the Work Tab actually lives in', async () => {
   // Incognito is a separate store, and `getAll` without `storeId` would answer from
   // the worker's own (regular-profile) store — omitting the incognito session and
@@ -691,6 +722,9 @@ test('an unscriptable page is an error, not a context with the worker user agent
   assert.equal(outcome.ok, false);
   assert.equal(outcome.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
   assert.match(outcome.message, /无法读取 Work Tab 页面/);
+  // Chrome's rejection text can quote the whole page URL (query string included), so
+  // neither the log nor the answer repeats it.
+  assert.equal(outcome.message.includes('http'), false, '错误消息不得带上浏览器给的 URL');
 });
 
 test('reports NOT_READY and CONTEXT_FAILED instead of throwing', async () => {
@@ -703,9 +737,16 @@ test('reports NOT_READY and CONTEXT_FAILED instead of throwing', async () => {
   assert.equal((await notAPage.read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` })).code, CONTEXT_ERROR_CODES.NOT_READY);
 
   const failing = createSource(createStubChrome({ failCookies: true }));
-  const failed = await failing.read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  const failed = await failing.read({
+    tabId: 1,
+    targetUrl: `${WORK_TAB_ORIGIN}/media/1?sign=very-secret`,
+    scope: TARGET_SCOPES.TARGET_ONLY,
+  });
   assert.equal(failed.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
-  assert.match(failed.message, /cookies boom/);
+  // The browser's own text is not forwarded: it can quote the URL it was handed,
+  // signature and all. Only the error's kind and the query-free origin travel.
+  assert.match(failed.message, /读取失败（Error/);
+  assert.equal(failed.message.includes('very-secret'), false, '错误消息不得带上 URL 的查询串');
 
   const unavailable = await createRequestContextSource({}).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
   assert.equal(unavailable.code, CONTEXT_ERROR_CODES.NOT_READY);

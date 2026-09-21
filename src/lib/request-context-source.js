@@ -3,6 +3,8 @@ import {
   TARGET_SCOPES,
   buildRequestContext,
   describeError,
+  describeErrorKind,
+  findAmbiguousCookieNames,
   isSameOrigin,
   mergeCookieSets,
   normalizeScope,
@@ -28,6 +30,12 @@ import {
  *   hand over a cookie store this extension has `<all_urls>` access to.
  * - **The work tab URL is read at request time.** V1 never stores it, so a page
  *   that navigated between two requests cannot leave a stale Referer behind.
+ *
+ * Failure reporting follows one more rule: an error raised by an API that was
+ * handed a URL (`scripting` with a tab, `cookies` with a target) is reported by its
+ * *kind* only — Chrome's text can quote the full URL, signature included. Errors
+ * that cannot carry a URL (a tab lookup echoing a tab id) keep their text, because
+ * that is where the useful diagnostic is.
  */
 
 /** Where the reported user agent came from. Part of the answer, not a detail. */
@@ -135,7 +143,7 @@ export function createRequestContextSource(options = {}) {
       const store = stores.find((candidate) => (candidate?.tabIds ?? []).includes(tabId));
       return { ok: true, storeId: store?.id };
     } catch (error) {
-      return { ok: false, reason: describeError(error) };
+      return { ok: false, error };
     }
   }
 
@@ -156,7 +164,7 @@ export function createRequestContextSource(options = {}) {
       const granted = await permissions.contains({ origins: [`${origin}/*`] });
       return { ok: granted === true, verified: true };
     } catch (error) {
-      return { ok: false, verified: true, reason: describeError(error) };
+      return { ok: false, verified: true, kind: describeErrorKind(error) };
     }
   }
 
@@ -168,6 +176,9 @@ export function createRequestContextSource(options = {}) {
    * site, and host access is shared with `chrome.cookies` — an answer built from
    * the worker's navigator would look complete while the cookie set behind it is
    * silently filtered. Reporting the failure is the only honest option.
+   *
+   * Chrome's rejection text can quote the whole page URL (query string and all), so
+   * neither the log nor the answer repeats it: only the error's kind is reported.
    */
   async function readPageFacts(tabId) {
     const { scripting } = resolveApis();
@@ -182,9 +193,9 @@ export function createRequestContextSource(options = {}) {
       }
       return { ok: false, reason: '页面没有返回可用的信息。' };
     } catch (error) {
-      const reason = `扩展无法在此页面执行脚本（通常是用户限制了该站点的访问权限）：${describeError(error)}`;
-      logger.warn?.(`[bridge] page facts unavailable: ${reason}`);
-      return { ok: false, reason };
+      const kind = describeErrorKind(error);
+      logger.warn?.(`[bridge] page facts unavailable for tab ${tabId} (${kind})`);
+      return { ok: false, reason: `扩展无法在此页面执行脚本（通常是用户限制了该站点的访问权限；${kind}）` };
     }
   }
 
@@ -224,26 +235,31 @@ export function createRequestContextSource(options = {}) {
     if (!access.ok) {
       return fail(
         CONTEXT_ERROR_CODES.CONTEXT_FAILED,
-        `扩展对目标站点没有访问权限（${targetOrigin}），无法保证 cookie 集合完整${access.reason === undefined ? '。' : `：${access.reason}`}`,
+        `扩展对目标站点没有访问权限（${targetOrigin}），无法保证 cookie 集合完整${access.kind === undefined ? '。' : `（${access.kind}）`}`,
       );
     }
 
     const { cookies } = resolveApis();
     const store = await resolveStoreId(request.tabId);
-    if (!store.ok) return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `无法确定 Work Tab 的 cookie store：${store.reason}`);
+    if (!store.ok) {
+      return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `无法确定 Work Tab 的 cookie store（${describeErrorKind(store.error)}）`);
+    }
     const storeFilter = store.storeId === undefined ? {} : { storeId: store.storeId };
 
-    let all;
+    let unpartitioned;
+    let partitioned = [];
     try {
-      const unpartitioned = await cookies.getAll({ url: target.url, ...storeFilter });
-      const partitioned =
-        partition.partitionKey === null
-          ? []
-          : await cookies.getAll({ url: target.url, ...storeFilter, partitionKey: partition.partitionKey });
-      all = mergeCookieSets(unpartitioned, partitioned);
+      unpartitioned = await cookies.getAll({ url: target.url, ...storeFilter });
+      if (partition.partitionKey !== null) {
+        partitioned = await cookies.getAll({ url: target.url, ...storeFilter, partitionKey: partition.partitionKey });
+      }
     } catch (error) {
-      return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `chrome.cookies 读取失败：${describeError(error)}`);
+      return fail(
+        CONTEXT_ERROR_CODES.CONTEXT_FAILED,
+        `chrome.cookies 读取失败（${describeErrorKind(error)}，目标 ${new URL(target.url).origin}）`,
+      );
     }
+    const all = mergeCookieSets(unpartitioned, partitioned);
 
     const facts = await readPageFacts(request.tabId);
     if (!facts.ok) return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `无法读取 Work Tab 页面：${facts.reason}`);
@@ -264,6 +280,9 @@ export function createRequestContextSource(options = {}) {
       scope: scope.scope,
       workTabUrl: workTab.url,
       cookies: all,
+      // Only a tie *between* the two queries is unreproducible; within one response
+      // the API already returned Chrome's own order.
+      duplicateCookieNames: findAmbiguousCookieNames({ unpartitioned, partitioned }),
       userAgent: pageFacts.userAgent,
       userAgentSource: USER_AGENT_SOURCES.PAGE,
       observedAt: new Date().toISOString(),

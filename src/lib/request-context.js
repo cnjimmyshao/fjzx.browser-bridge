@@ -272,27 +272,34 @@ export function resolvePartitionKey(input) {
  *
  * A partitioned cookie and an unpartitioned one are different cookies, so they can
  * share a name and a path; both match a request and Chrome sends both, ordered by
- * path length and then by creation time. Longer paths first is reproducible, and so
- * is anything at a different length — only a tie **within one path length** falls
- * back to creation time, which `chrome.cookies` does not expose. Reporting exactly
- * those ties is the honest alternative to guessing, and keeps a merely repeated
- * name (deterministic order) out of the field.
+ * path length and then by creation time — which `chrome.cookies` does not expose.
  *
- * @param {Array<{name?: unknown, path?: unknown}>} cookies
+ * Only a tie that **spans the two queries** is ambiguous. Within one `getAll`
+ * result the API returns the browser's own order (measured), and the stable sort
+ * keeps it, so two same-named cookies from the same query — on different domains,
+ * say `sid` on `.example.com` and on `app.example.com` — are ordered exactly as
+ * Chrome ordered them and must not be reported. What the merge loses is only the
+ * relative order *between* the two responses.
+ *
+ * @param {{unpartitioned?: Array<object>, partitioned?: Array<object>}} [groups]
  * @returns {string[]} sorted, unique
  */
-export function findDuplicateCookieNames(cookies) {
-  if (!Array.isArray(cookies)) return [];
-  const seen = new Set();
-  const ambiguous = new Set();
-  for (const cookie of cookies) {
-    if (!cookie || typeof cookie.name !== 'string') continue;
+export function findAmbiguousCookieNames(groups = {}) {
+  const key = (cookie) => {
     const path = typeof cookie.path === 'string' ? cookie.path : '/';
-    const key = `${cookie.name}\u0000${path.length}`;
-    if (seen.has(key)) ambiguous.add(cookie.name);
-    seen.add(key);
-  }
-  return [...ambiguous].sort();
+    return `${cookie.name}\u0000${path.length}`;
+  };
+  const from = (group) =>
+    new Set(
+      (Array.isArray(group) ? group : [])
+        .filter((cookie) => cookie && typeof cookie.name === 'string')
+        .map(key),
+    );
+
+  const unpartitioned = from(groups.unpartitioned);
+  const partitioned = from(groups.partitioned);
+  const ambiguous = [...unpartitioned].filter((candidate) => partitioned.has(candidate));
+  return [...new Set(ambiguous.map((candidate) => candidate.slice(0, candidate.indexOf('\u0000'))))].sort();
 }
 
 /**
@@ -356,6 +363,25 @@ export function describeError(error) {
 }
 
 /**
+ * The *kind* of a failure, never its text.
+ *
+ * Browser error messages are not safe to forward verbatim: `chrome.scripting`
+ * rejections can embed the whole page URL, query string and signature included, and
+ * the same is true of anything that quotes the target. Everything that reports or
+ * logs a browser API failure therefore uses the name only.
+ */
+export function describeErrorKind(error) {
+  try {
+    if (error && typeof error === 'object' && typeof error.name === 'string' && error.name !== '') {
+      return error.name;
+    }
+    return 'Error';
+  } catch {
+    return 'Error';
+  }
+}
+
+/**
  * Assemble the response body. Pure: the caller passes in what the browser APIs
  * returned, so the same inputs produce the same context in a test.
  *
@@ -389,6 +415,7 @@ export function describeError(error) {
  *   observedAt: string,
  *   documentReferrer?: string | null,
  *   referrerPolicy?: string | null,
+ *   duplicateCookieNames?: string[],
  *   serviceWorkerUserAgent?: string | null,
  * }} input
  */
@@ -408,10 +435,10 @@ export function buildRequestContext(input) {
     cookieCount: described.length,
     httpOnlyCookieCount: described.filter((cookie) => cookie.httpOnly).length,
     partitionedCookieCount: described.filter((cookie) => cookie.partitioned).length,
-    // Non-empty means the header carries the same name twice and Bridge cannot
-    // reproduce Chrome's ordering inside one path length; `cookies` says which
-    // entry belongs to which partition.
-    duplicateCookieNames: findDuplicateCookieNames(cookies),
+    // Non-empty means the header carries the same name twice in a way Bridge cannot
+    // order (the merge of two queries); `cookies` says which entry belongs to which
+    // partition. Computed by the caller, which is where the two query results exist.
+    duplicateCookieNames: Array.isArray(input.duplicateCookieNames) ? input.duplicateCookieNames : [],
     cookies: described,
     userAgent: input.userAgent ?? null,
     userAgentSource: input.userAgentSource,

@@ -1,8 +1,8 @@
 {
-  "at": "2026-09-21T15:12:10.519Z",
+  "at": "2026-09-21T15:24:59.063Z",
   "extension": "D:\\nodejs\\com.fajiezhixin.browser-bridge\\src",
-  "service": "ws://127.0.0.1:8659",
-  "origin": "http://127.0.0.1:8658",
+  "service": "ws://127.0.0.1:28141",
+  "origin": "http://127.0.0.1:28140",
   "summary": {
     "total": 15,
     "passed": 15,
@@ -92,7 +92,7 @@
           "sec-fetch-site": "same-origin",
           "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
         },
-        "referer": "http://127.0.0.1:8658/feed",
+        "referer": "http://127.0.0.1:28140/feed",
         "cookieNames": [
           "sid",
           "theme",
@@ -140,7 +140,7 @@
           }
         ],
         "userAgentSource": "work-tab-page",
-        "observedAt": "2026-09-21T15:12:08.513Z"
+        "observedAt": "2026-09-21T15:24:57.091Z"
       }
     },
     {
@@ -148,7 +148,7 @@
       "detail": {
         "status": 200,
         "bytes": 65536,
-        "digest": "2a6d08f724b941f7a657c6aade4e391615cc50b8a694ef26142231aec36d17ef"
+        "digest": "d20a67069c49d311b0329f87ed649de61cd5943e9f985e8b65dbb06ec7c5fe7a"
       }
     },
     {

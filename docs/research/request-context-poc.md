@@ -263,18 +263,20 @@ cookie: sid=…; theme=…; strict=…
 
 `referer` 是 Bridge 的**建议值**；`documentReferrer` 是页面自陈的**事实**（Chrome 153 上 `referrerPolicy` 恒为 `null`，见 [§7.4](#74-两个被-poc-纠正的实现细节)）。把两者分开返回，是为了不在 Bridge 里替 Service 判断"真实的发起页是谁"。
 
-`duplicateCookieNames` 非空表示 `cookieHeader` 里出现了**同一 path 长度内同名**的 cookie（分区与非分区是两份 cookie，可以同名同 path，浏览器会把两份都发出去）。Chrome 先按 path 长度排序、再按创建时间排序，而 `chrome.cookies` 不暴露创建时间——所以只有**同一 path 长度内的并列**无法复现，Bridge 把这种真正有歧义的情况**显式报告**出来，由 Service 用 `cookies[].partitioned` / `topLevelSite` 自己判断；仅仅是同名但 path 长度不同（顺序本来就是确定的）不会进入这个字段。另外，Chrome 可能持有形如 `=value` 的**无名 cookie**：它同样会被保留在 `cookieHeader` 与元数据里，不会被静默丢掉。
+`duplicateCookieNames` 非空表示 `cookieHeader` 里的同名并列**跨了两次查询**（非分区查询与分区查询），因此顺序由 Bridge 决定、而不是 Chrome 决定的。分区与非分区是两份 cookie，可以同名同 path，浏览器会把两份都发；`chrome.cookies` 不暴露创建时间，合并两个响应时相对顺序就丢了。**同一次查询内部**的顺序是 API 按浏览器发送顺序返回的（实测），稳定排序会保留，所以那类重名（例如两个域上都叫 `sid`）**不会**进这个字段；path 长度不同的重名也不会（长度本身就决定了顺序）。另外，Chrome 可能持有形如 `=value` 的**无名 cookie**：它同样会被保留在 `cookieHeader` 与元数据里，不会被静默丢掉。
 
 失败（`ok:false`）沿用 V1 `RESULT.error` 的形状：`{ code, message }`。code 集合（`CONTEXT_ERROR_CODES`，与 V1 的 `ERROR_CODES` **分开**，不动后者）：
 
 | code | 含义 | 备注 |
 | --- | --- | --- |
-| `NOT_READY` | 没有唯一 Work Tab / 上下文 API 不可用 | **只判绑定与 API 可用性，不与 `USER_SCRIPTS_UNAVAILABLE` 联动**（读 cookie 不需要用户脚本授权，实测场景 4）|
+| `NOT_READY` | 没有唯一 Work Tab / 上下文 API 不可用 / 采样期间绑定变化 | **只判绑定与 API 可用性，不与 `USER_SCRIPTS_UNAVAILABLE` 联动**（读 cookie 不需要用户脚本授权，实测场景 4）|
 | `INVALID_TARGET_URL` | 非 http(s)、相对 URL、内嵌凭据 | |
 | `INVALID_SCOPE` | `scope` 既不是 `WORK_TAB_ORIGIN` 也不是 `TARGET_ONLY` | 拒绝而不是静默按默认处理 |
 | `INVALID_PARTITION` | `topLevelSite` 不是合法 URL，或 `hasCrossSiteAncestor` 不是 boolean | `topLevelSite: null` 也不豁免 boolean 校验 |
 | `TARGET_OUT_OF_SCOPE` | 默认 scope 下 targetUrl 与 Work Tab 不同源 | 此时**不会**触碰 cookie API |
-| `CONTEXT_FAILED` | `chrome.cookies` 调用失败、页面读不到（站点访问受限）、**目标站点访问权限被撤下**、上下文不可序列化、**采样期间 Work Tab 发生了导航**（重试一次后仍不一致）| |
+| `CONTEXT_FAILED` | `chrome.cookies` 调用失败、页面读不到（站点访问受限）、**目标站点访问权限被撤下**、cookie store 无法确定、上下文不可序列化、**采样期间 Work Tab 发生了导航**（重试一次后仍不一致）| |
+
+**错误信息里的禁忌**：浏览器 API 的错误文本可能原样带上被查询的 URL（`chrome.scripting` 的拒绝消息就可能包含整条页面 URL，含签名参数），因此凡是"被交过 URL 的 API"失败，返回与日志里**只报错误类型**（`Error` 之类）与不含查询串的 origin，绝不转发原文。
 
 **关于"最小上下文"的一句诚实说明**：`chrome.cookies` 返回的是**存储中匹配该 URL 的 cookie 全集**，不套用 SameSite 与第三方拦截，因此它可能比浏览器"此刻真的会发"的集合更大。Bridge 选择把这件事写进契约（`userAgentSource`、`duplicateCookieNames`、以及本句），而不是假装自己知道浏览器会怎么裁剪。
 
@@ -311,7 +313,7 @@ cookie: sid=…; theme=…; strict=…
 6. **Bridge 给的是"页面自陈的事实"，不是"线上真相"。** 实测已经看到两处背离：页面级 UA 覆盖会让页面值与 SW 值不同（实现选了页面值），而 `declarativeNetRequest` 改的是**线上头**、页面 `navigator.userAgent` 完全不变。想要逐字还原真实 wire 头，MV3 里只有 `chrome.debugger`+CDP 一条路（并付出权限警告、调试提示条、与 DevTools 冲突、可能被企业策略阻止的代价）。**本能力不承诺 L4 级保真。**
 7. **未做 Edge 实测**：Edge 复用 Chromium 实现、官方对 `chrome.cookies` 参数级行为零文档（[01 §12](notes/01-cookie-api.md)）——同一套代码，但参数级行为需在 Edge 上复测。
 8. **未做 incognito / 企业策略路径**：`runtime_blocked_hosts` 可能让 `getAll` 返回空或失败；实现里需要降级分支。
-9. **同一 path 长度内的同名 cookie 顺序无法复现**：分区与非分区可以同名同 path，浏览器按 path + 创建时间排序后两份都发；API 不暴露创建时间，所以只有"同一 path 长度内的并列"做不到逐字复现（path 长度不同时顺序本就确定）。实现选择**显式报告**（`duplicateCookieNames`）而不是猜。
+9. **只有跨查询的正常名并列无法复现顺序**：两次 `getAll`（非分区 + 分区）合并时，响应之间的相对顺序丢失；同一次响应内部保持 API 顺序（= 浏览器发送顺序），path 长度不同时顺序也确定。实现只对真正有歧义的那种情况报 `duplicateCookieNames`，不做无谓告警。
 10. **页面读不到就是失败，不会降级**：若用户限制了扩展对该站点的访问，`chrome.scripting` 会拒绝执行——而此时 `chrome.cookies` 也在静默过滤，所以实现直接返回 `CONTEXT_FAILED`，而不是回退到 worker 自己的 UA 交出一份"看起来完整"的上下文。
 11. **采样期间绑定变化会被拦下**：读取是异步的，期间出现第二个普通 Tab 会让 Bridge 变成 `MULTIPLE_TABS`；实现会先等 Work Tab 的当前快照（`settled()`）再复验绑定，变化时返回 `NOT_READY`，而不是继续披露按旧绑定采到的上下文。
 12. **隐身窗口要走对的 cookie store**：扩展在隐身模式下启用时，隐身 Tab 有自己的 store；不传 `storeId` 的 `getAll` 会读到普通 profile 的 store（既漏掉隐身会话，又可能把普通 profile 的 cookie 交出去）。实现用 `getAllCookieStores()` 按 `tabId` 解析 store 并显式传入；没有任何 store 认领该 Tab 时退回默认 store（不猜）。
