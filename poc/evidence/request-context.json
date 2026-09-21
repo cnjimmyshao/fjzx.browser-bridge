@@ -1,0 +1,607 @@
+{
+  "at": "2026-09-21T11:10:12.713Z",
+  "finishedAt": "2026-09-21T11:10:17.706Z",
+  "poc": "issue #13 minimal request context",
+  "browser": {
+    "executable": "C:\\Users\\shaoning\\chrome\\win64-153.0.8010.52\\chrome-win64\\chrome.exe",
+    "headless": true
+  },
+  "origin": {
+    "feedUrl": "http://127.0.0.1:3415/feed",
+    "mediaUrl": "http://127.0.0.1:3415/media/1",
+    "altMediaUrl": "http://localhost:3415/media/1",
+    "payloadBytes": 65536,
+    "payloadDigest": "a28d3527f211b690ac65773cce0fcc576c6bb50dab045b0f993b61a7b5ffc374"
+  },
+  "summary": {
+    "total": 27,
+    "passed": 27,
+    "failed": []
+  },
+  "checks": [
+    {
+      "id": "transport.node-can-set-cookie-useragent-referer",
+      "ok": true,
+      "detail": {
+        "status": 200,
+        "cookieNamesServerSaw": [
+          "sid"
+        ],
+        "refererServerSaw": "http://127.0.0.1:3415/feed",
+        "userAgentServerSaw": "RequestContextPOC/preflight"
+      }
+    },
+    {
+      "id": "bridge.connects-to-service",
+      "ok": true,
+      "detail": {
+        "serviceUrl": "ws://127.0.0.1:3416"
+      }
+    },
+    {
+      "id": "page.javascript-cannot-read-httponly-cookie",
+      "ok": true,
+      "detail": {
+        "documentCookieMasked": "theme=***; strict=***"
+      }
+    },
+    {
+      "id": "page.browser-can-fetch-media",
+      "ok": true,
+      "detail": {
+        "digest": "a28d3527f211b690ac65773cce0fcc576c6bb50dab045b0f993b61a7b5ffc374",
+        "serverDigest": "a28d3527f211b690ac65773cce0fcc576c6bb50dab045b0f993b61a7b5ffc374",
+        "cookieNamesServerSaw": [
+          "sid",
+          "theme",
+          "strict"
+        ],
+        "userAgentServerSaw": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
+      }
+    },
+    {
+      "id": "bridge.reports-work-tab",
+      "ok": true,
+      "detail": {
+        "state": "IDLE",
+        "workTabUrl": "http://127.0.0.1:3415/feed"
+      }
+    },
+    {
+      "id": "context.same-origin-request-succeeds",
+      "ok": true,
+      "detail": {
+        "scope": "WORK_TAB_ORIGIN",
+        "targetOrigin": "http://127.0.0.1:3415",
+        "cookieCount": 3,
+        "cookieHeaderMasked": "sid=***; theme=***; strict=***",
+        "userAgentSource": "work-tab-page"
+      }
+    },
+    {
+      "id": "context.includes-httponly-session-cookie",
+      "ok": true,
+      "detail": {
+        "cookieCount": 3,
+        "httpOnlyCookieCount": 1,
+        "cookieMetadata": [
+          {
+            "name": "sid",
+            "domain": "127.0.0.1",
+            "path": "/",
+            "secure": false,
+            "httpOnly": true,
+            "sameSite": "lax",
+            "session": true,
+            "partitioned": false,
+            "topLevelSite": null
+          },
+          {
+            "name": "theme",
+            "domain": "127.0.0.1",
+            "path": "/",
+            "secure": false,
+            "httpOnly": false,
+            "sameSite": "lax",
+            "session": true,
+            "partitioned": false,
+            "topLevelSite": null
+          },
+          {
+            "name": "strict",
+            "domain": "127.0.0.1",
+            "path": "/",
+            "secure": false,
+            "httpOnly": false,
+            "sameSite": "strict",
+            "session": true,
+            "partitioned": false,
+            "topLevelSite": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "context.same-site-cookie-returned-despite-samesite",
+      "ok": true,
+      "detail": {
+        "note": "SameSite 只约束浏览器发送，不约束 chrome.cookies 读取。",
+        "cookieHeaderMasked": "sid=***; theme=***; strict=***"
+      }
+    },
+    {
+      "id": "context.user-agent-comes-from-the-work-tab-page",
+      "ok": true,
+      "detail": {
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+        "pageUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
+      }
+    },
+    {
+      "id": "context.referer-is-the-work-tab-url",
+      "ok": true,
+      "detail": {
+        "referer": "http://127.0.0.1:3415/feed"
+      }
+    },
+    {
+      "id": "context.reports-page-self-reported-referrer-facts",
+      "ok": true,
+      "detail": {
+        "documentReferrer": "",
+        "referrerPolicy": null,
+        "pageReferrerFacts": {
+          "referrer": "",
+          "referrerPolicy": null,
+          "policyType": "undefined",
+          "pageUrl": "http://127.0.0.1:3415/feed"
+        },
+        "note": "document.referrer 为空（页面由 CDP 新建标签页打开）；实测 Chrome 153 页面里 document.referrerPolicy 是 undefined，所以该字段只能为 null——生效策略只能由 Service 按浏览器默认值或响应头推断。"
+      }
+    },
+    {
+      "id": "context.carries-observed-at",
+      "ok": true,
+      "detail": {
+        "observedAt": "2026-09-21T11:10:16.858Z"
+      }
+    },
+    {
+      "id": "service.downloads-protected-resource-with-context",
+      "ok": true,
+      "detail": {
+        "status": 200,
+        "bytes": 65536,
+        "digest": "a28d3527f211b690ac65773cce0fcc576c6bb50dab045b0f993b61a7b5ffc374",
+        "browserDigest": "a28d3527f211b690ac65773cce0fcc576c6bb50dab045b0f993b61a7b5ffc374"
+      }
+    },
+    {
+      "id": "service.supports-range-replay",
+      "ok": true,
+      "detail": {
+        "status": 206,
+        "bytes": 1024
+      }
+    },
+    {
+      "id": "control.without-cookie-is-rejected",
+      "ok": true,
+      "detail": {
+        "status": 401
+      }
+    },
+    {
+      "id": "control.without-referer-is-rejected",
+      "ok": true,
+      "detail": {
+        "status": 403
+      }
+    },
+    {
+      "id": "control.without-user-agent-is-rejected",
+      "ok": true,
+      "detail": {
+        "status": 403
+      }
+    },
+    {
+      "id": "scope.cross-origin-refused-by-default",
+      "ok": true,
+      "detail": {
+        "code": "TARGET_OUT_OF_SCOPE",
+        "message": "targetUrl 与 Work Tab 不同源（http://localhost:3415 ≠ http://127.0.0.1:3415）；跨源必须显式使用 scope=TARGET_ONLY。"
+      }
+    },
+    {
+      "id": "scope.cross-origin-allowed-when-explicit",
+      "ok": true,
+      "detail": {
+        "cookieCount": 0,
+        "cookieHeaderMasked": "",
+        "cookieMetadata": []
+      }
+    },
+    {
+      "id": "scope.cross-origin-returns-only-that-hosts-cookies",
+      "ok": true,
+      "detail": {
+        "note": "Session cookie 是 127.0.0.1 的 host-only cookie，绝不应出现在 localhost 的上下文里。"
+      }
+    },
+    {
+      "id": "chips.partitioned-cookie-needs-a-partition-query",
+      "ok": true,
+      "detail": {
+        "partitionedCookieFound": {
+          "name": "part",
+          "domain": "localhost",
+          "path": "/",
+          "secure": true,
+          "httpOnly": false,
+          "sameSite": "no_restriction",
+          "session": true,
+          "partitioned": true,
+          "topLevelSite": "http://127.0.0.1"
+        },
+        "note": "同一 URL：不指定 partitionKey 时 0 个 cookie；指定 topLevelSite 后才看得到 Partitioned cookie。"
+      }
+    },
+    {
+      "id": "scope.unrelated-origin-yields-nothing",
+      "ok": true,
+      "detail": {
+        "cookieCount": 0
+      }
+    },
+    {
+      "id": "scope.non-http-targets-refused",
+      "ok": true,
+      "detail": {
+        "replies": [
+          {
+            "targetUrl": "file:///C:/Windows/win.ini",
+            "ok": false,
+            "code": "INVALID_TARGET_URL"
+          },
+          {
+            "targetUrl": "javascript:alert(1)",
+            "ok": false,
+            "code": "INVALID_TARGET_URL"
+          },
+          {
+            "targetUrl": "/media/1",
+            "ok": false,
+            "code": "INVALID_TARGET_URL"
+          },
+          {
+            "targetUrl": "",
+            "ok": false,
+            "code": "INVALID_TARGET_URL"
+          }
+        ]
+      }
+    },
+    {
+      "id": "user-agent.page-override-is-what-the-page-uses",
+      "ok": true,
+      "detail": {
+        "pageUserAgentAfterOverride": "RequestContextPOC/9.9 (page-level override)"
+      }
+    },
+    {
+      "id": "user-agent.context-follows-the-page-not-the-worker",
+      "ok": true,
+      "detail": {
+        "contextUserAgent": "RequestContextPOC/9.9 (page-level override)",
+        "serviceWorkerUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
+      }
+    },
+    {
+      "id": "security.nothing-persisted",
+      "ok": true,
+      "detail": {
+        "storageKeys": [
+          "pocServiceUrl"
+        ]
+      }
+    },
+    {
+      "id": "bridge.refuses-when-no-work-tab",
+      "ok": true,
+      "detail": {
+        "code": "NOT_READY",
+        "message": "没有唯一 Work Tab（NO_WORK_TAB）。"
+      }
+    }
+  ],
+  "observations": [
+    {
+      "id": "browser.request-headers-for-same-origin-media",
+      "detail": {
+        "headers": {
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate, br, zstd",
+          "accept-language": "zh-CN,zh;q=0.9",
+          "sec-ch-ua": "\"Chromium\";v=\"153\", \"Not_A Brand\";v=\"8\"",
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": "\"Windows\"",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-origin",
+          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
+        },
+        "cookieNames": [
+          "sid",
+          "theme",
+          "strict"
+        ],
+        "referer": "http://127.0.0.1:3415/feed",
+        "secFetchSite": "same-origin"
+      }
+    },
+    {
+      "id": "samesite.cross-site-request-from-page",
+      "detail": {
+        "requests": [
+          {
+            "path": "/embed",
+            "secFetchSite": "cross-site",
+            "cookieNames": [],
+            "hasStrictCookie": false,
+            "status": 200,
+            "headers": {
+              "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+              "accept-encoding": "gzip, deflate, br, zstd",
+              "accept-language": "zh-CN,zh;q=0.9",
+              "sec-ch-ua": "\"Chromium\";v=\"153\", \"Not_A Brand\";v=\"8\"",
+              "sec-ch-ua-mobile": "?0",
+              "sec-ch-ua-platform": "\"Windows\"",
+              "sec-fetch-dest": "iframe",
+              "sec-fetch-mode": "navigate",
+              "sec-fetch-site": "cross-site",
+              "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+              "upgrade-insecure-requests": "1"
+            }
+          },
+          {
+            "path": "/login-partitioned",
+            "secFetchSite": "same-origin",
+            "cookieNames": [],
+            "hasStrictCookie": false,
+            "status": 200,
+            "headers": {
+              "accept": "*/*",
+              "accept-encoding": "gzip, deflate, br, zstd",
+              "accept-language": "zh-CN,zh;q=0.9",
+              "sec-ch-ua": "\"Chromium\";v=\"153\", \"Not_A Brand\";v=\"8\"",
+              "sec-ch-ua-mobile": "?0",
+              "sec-ch-ua-platform": "\"Windows\"",
+              "sec-fetch-dest": "empty",
+              "sec-fetch-mode": "cors",
+              "sec-fetch-site": "same-origin",
+              "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
+            }
+          },
+          {
+            "path": "/media/1",
+            "secFetchSite": "cross-site",
+            "cookieNames": [
+              "part"
+            ],
+            "hasStrictCookie": false,
+            "status": 401,
+            "headers": {
+              "accept": "*/*",
+              "accept-encoding": "gzip, deflate, br, zstd",
+              "accept-language": "zh-CN,zh;q=0.9",
+              "sec-ch-ua": "\"Chromium\";v=\"153\", \"Not_A Brand\";v=\"8\"",
+              "sec-ch-ua-mobile": "?0",
+              "sec-ch-ua-platform": "\"Windows\"",
+              "sec-fetch-dest": "empty",
+              "sec-fetch-mode": "cors",
+              "sec-fetch-site": "cross-site",
+              "origin": "http://127.0.0.1:3415",
+              "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "chips.third-party-frame-login-partitioned",
+      "detail": {
+        "requests": [
+          {
+            "host": "localhost:3415",
+            "status": 200,
+            "secFetchSite": "same-origin",
+            "cookieNames": []
+          }
+        ],
+        "notes": "Set-Cookie 是否被接受由第 10 步的 getAll 结果间接反映。"
+      }
+    },
+    {
+      "id": "transport.node-fetch-default-user-agent",
+      "detail": {
+        "userAgentServerSaw": "node",
+        "note": "未显式设置时 fetch 发送 \"node\"；不带任何 User-Agent 需要 node:http。"
+      }
+    },
+    {
+      "id": "chips.partitioned-cookie-visibility",
+      "detail": {
+        "targetUrl": "http://localhost:3415/media/1",
+        "cookiesReturnedWithoutPartition": [],
+        "cookiesReturnedWithPartition": [
+          {
+            "name": "part",
+            "domain": "localhost",
+            "path": "/",
+            "secure": true,
+            "httpOnly": false,
+            "sameSite": "no_restriction",
+            "session": true,
+            "partitioned": true,
+            "topLevelSite": "http://127.0.0.1"
+          }
+        ],
+        "browserSentThePartitionedCookie": true
+      }
+    },
+    {
+      "id": "security.enumeration-surface",
+      "detail": {
+        "note": "scope=TARGET_ONLY 时任何 http(s) URL 都可询问；此例返回 0 个 cookie 只因该 origin 本就没有 cookie。"
+      }
+    },
+    {
+      "id": "server.request-log",
+      "detail": {
+        "entries": [
+          {
+            "path": "/media/1",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [
+              "sid"
+            ],
+            "secFetchSite": null,
+            "status": 200,
+            "note": null
+          },
+          {
+            "path": "/feed",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [],
+            "secFetchSite": "none",
+            "status": 200,
+            "note": null
+          },
+          {
+            "path": "/embed",
+            "host": "localhost:3415",
+            "cookieNames": [],
+            "secFetchSite": "cross-site",
+            "status": 200,
+            "note": null
+          },
+          {
+            "path": "/login-partitioned",
+            "host": "localhost:3415",
+            "cookieNames": [],
+            "secFetchSite": "same-origin",
+            "status": 200,
+            "note": null
+          },
+          {
+            "path": "/favicon.ico",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [],
+            "secFetchSite": "same-origin",
+            "status": 404,
+            "note": "NOT_FOUND"
+          },
+          {
+            "path": "/login",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [],
+            "secFetchSite": "same-origin",
+            "status": 200,
+            "note": null
+          },
+          {
+            "path": "/media/1",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [
+              "sid",
+              "theme",
+              "strict"
+            ],
+            "secFetchSite": "same-origin",
+            "status": 200,
+            "note": null
+          },
+          {
+            "path": "/media/1",
+            "host": "localhost:3415",
+            "cookieNames": [
+              "part"
+            ],
+            "secFetchSite": "cross-site",
+            "status": 401,
+            "note": "MISSING_SESSION"
+          },
+          {
+            "path": "/media/1",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [
+              "sid",
+              "theme",
+              "strict"
+            ],
+            "secFetchSite": null,
+            "status": 200,
+            "note": null
+          },
+          {
+            "path": "/media/1",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [
+              "sid",
+              "theme",
+              "strict"
+            ],
+            "secFetchSite": null,
+            "status": 206,
+            "note": "RANGE 0-1023"
+          },
+          {
+            "path": "/media/1",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [],
+            "secFetchSite": null,
+            "status": 401,
+            "note": "MISSING_SESSION"
+          },
+          {
+            "path": "/media/1",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [
+              "sid",
+              "theme",
+              "strict"
+            ],
+            "secFetchSite": null,
+            "status": 403,
+            "note": "BAD_REFERER"
+          },
+          {
+            "path": "/media/1",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [
+              "sid",
+              "theme",
+              "strict"
+            ],
+            "secFetchSite": null,
+            "status": 403,
+            "note": "MISSING_USER_AGENT"
+          },
+          {
+            "path": "/media/1",
+            "host": "127.0.0.1:3415",
+            "cookieNames": [
+              "sid",
+              "theme",
+              "strict"
+            ],
+            "secFetchSite": null,
+            "status": 200,
+            "note": null
+          }
+        ]
+      }
+    }
+  ]
+}

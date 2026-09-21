@@ -1,0 +1,275 @@
+/**
+ * Request-context POC logic, kept free of `chrome.*` so `node --test` can drive
+ * every decision without a browser.
+ *
+ * The question this module answers is narrow on purpose: given a *target URL*
+ * and the cookie objects the browser reports for exactly that URL, what is the
+ * minimal context a Node client needs to replay one request for that URL?
+ *
+ * Two properties matter more than the shape of the payload:
+ *
+ * - **Nothing here is site-aware.** There is no hostname, no domain suffix list,
+ *   no platform. Scope is decided by comparing origins, which is a statement
+ *   about URLs, not about websites.
+ * - **Cookie values never leave through a side channel.** Only `buildCookieHeader`
+ *   returns values, and it returns them in the single field the Service must
+ *   have; every diagnostic path goes through `maskCookieHeader`, which keeps
+ *   names and drops values.
+ */
+
+/** How far a context request may reach beyond the Work Tab. */
+export const TARGET_SCOPES = Object.freeze({
+  /**
+   * Default: the target must be same-origin with the Work Tab. Generic (an
+   * origin comparison), and the only scope in which "the page the operator is
+   * looking at" justifies handing out its cookies.
+   */
+  WORK_TAB_ORIGIN: 'WORK_TAB_ORIGIN',
+  /**
+   * Explicit opt-in: any http(s) target is accepted, and the disclosed set is
+   * still only what the browser would send to *that* URL — never the whole jar.
+   * Needed for cross-origin media hosts; see the report's security section for
+   * why it is not the default.
+   */
+  TARGET_ONLY: 'TARGET_ONLY',
+});
+
+/** POC-only error codes, modelled on V1's small `RESULT.error.code` vocabulary. */
+export const CONTEXT_ERROR_CODES = Object.freeze({
+  NOT_READY: 'NOT_READY',
+  INVALID_TARGET_URL: 'INVALID_TARGET_URL',
+  TARGET_OUT_OF_SCOPE: 'TARGET_OUT_OF_SCOPE',
+  CONTEXT_FAILED: 'CONTEXT_FAILED',
+});
+
+const ALLOWED_PROTOCOLS = ['http:', 'https:'];
+
+/**
+ * Accept only an absolute http(s) URL without embedded credentials.
+ *
+ * The fragment is dropped because it is never sent in a request, so keeping it
+ * would only make two identical contexts look different. Credentials in the URL
+ * are refused rather than stripped: silently rewriting what the Service asked
+ * about is worse than telling it the URL is unusable.
+ *
+ * @param {unknown} raw
+ * @returns {{ok: true, url: string} | {ok: false, reason: string}}
+ */
+export function normalizeTargetUrl(raw) {
+  if (typeof raw !== 'string' || raw === '') {
+    return { ok: false, reason: 'targetUrl 必须是非空字符串。' };
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return { ok: false, reason: 'targetUrl 不是绝对 URL。' };
+  }
+
+  if (!ALLOWED_PROTOCOLS.includes(parsed.protocol)) {
+    return { ok: false, reason: `targetUrl 的 scheme 必须是 http/https，收到 ${parsed.protocol}` };
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    return { ok: false, reason: 'targetUrl 不得内嵌凭据。' };
+  }
+
+  parsed.hash = '';
+  return { ok: true, url: parsed.toString() };
+}
+
+/**
+ * @param {string} a absolute URL
+ * @param {string} b absolute URL
+ */
+export function isSameOrigin(a, b) {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Build the `Cookie` request header from `chrome.cookies.getAll({url})` objects.
+ *
+ * The set is already the browser's own answer to "what applies to this URL", so
+ * the only ordering question is which cookie wins when two share a name. RFC 6265
+ * sends longer paths first, so the sort key is path length only, and the sort is
+ * *stable*: within one path length the order `chrome.cookies` returned is kept.
+ * Measured against Chrome for Testing 153, that order is the order the browser
+ * itself sends (`sid, theme, strict` in the POC run) — sorting by name instead
+ * would silently reorder a header the Service is trying to reproduce.
+ *
+ * @param {Array<{name?: unknown, value?: unknown, path?: unknown}>} cookies
+ */
+export function buildCookieHeader(cookies) {
+  if (!Array.isArray(cookies)) return '';
+
+  return cookies
+    .filter((cookie) => cookie && typeof cookie.name === 'string' && cookie.name !== '')
+    .map((cookie) => ({
+      name: cookie.name,
+      value: typeof cookie.value === 'string' ? cookie.value : '',
+      path: typeof cookie.path === 'string' ? cookie.path : '/',
+    }))
+    .sort((left, right) => right.path.length - left.path.length)
+    .map((cookie) => `${cookie.name}=${cookie.value}`)
+    .join('; ');
+}
+
+/**
+ * Which top-level site a partitioned cookie belongs to.
+ *
+ * CHIPS keys a cookie by the site of the top-level document. Bridge can only
+ * answer "what would apply to this URL" once it is told which partition to look
+ * in — measured: without it, `chrome.cookies.getAll({url})` returns nothing at
+ * all for a `Partitioned` cookie that the browser does send on a real request.
+ *
+ * @param {unknown} raw
+ * @returns {{ok: true, topLevelSite: string} | {ok: false, reason: string}}
+ */
+export function normalizeTopLevelSite(raw) {
+  const normalized = normalizeTargetUrl(raw);
+  if (!normalized.ok) return { ok: false, reason: `topLevelSite 无效：${normalized.reason}` };
+  return { ok: true, topLevelSite: new URL(normalized.url).origin };
+}
+
+/**
+ * Merge the unpartitioned and partitioned answers for one target URL.
+ *
+ * `chrome.cookies.getAll` returns unpartitioned cookies when no `partitionKey` is
+ * given and the cookies of the named partition when one is, so a complete answer
+ * needs both queries. Duplicates cannot occur: a cookie is either partitioned or
+ * not, and `chrome.cookies` reports which.
+ *
+ * @param {Array<object>} unpartitioned
+ * @param {Array<object>} partitioned
+ */
+export function mergeCookieSets(unpartitioned, partitioned) {
+  const left = Array.isArray(unpartitioned) ? unpartitioned : [];
+  const right = Array.isArray(partitioned) ? partitioned : [];
+  return [...left, ...right];
+}
+
+/**
+ * Cookie metadata without a single value: what a Service (or a log) may see
+ * about *why* a header looks the way it does.
+ *
+ * @param {Array<object>} cookies
+ */
+export function describeCookies(cookies) {
+  if (!Array.isArray(cookies)) return [];
+
+  return cookies
+    .filter((cookie) => cookie && typeof cookie.name === 'string')
+    .map((cookie) => ({
+      name: cookie.name,
+      domain: typeof cookie.domain === 'string' ? cookie.domain : '',
+      path: typeof cookie.path === 'string' ? cookie.path : '',
+      secure: cookie.secure === true,
+      httpOnly: cookie.httpOnly === true,
+      sameSite: typeof cookie.sameSite === 'string' ? cookie.sameSite : 'unspecified',
+      session: cookie.session === true,
+      partitioned: Boolean(cookie.partitionKey),
+      topLevelSite: cookie.partitionKey?.topLevelSite ?? null,
+    }));
+}
+
+/**
+ * Keep cookie *names* and drop every value. Every log line and every error
+ * message about cookies goes through here, so a leak is a missing call rather
+ * than a formatting accident.
+ *
+ * @param {string} header
+ */
+export function maskCookieHeader(header) {
+  if (typeof header !== 'string' || header === '') return '';
+  return header
+    .split(';')
+    .map((pair) => pair.trim())
+    .filter((pair) => pair !== '')
+    .map((pair) => {
+      const separator = pair.indexOf('=');
+      const name = separator === -1 ? pair : pair.slice(0, separator);
+      return `${name}=***`;
+    })
+    .join('; ');
+}
+
+/** Describe any failure value without ever throwing. */
+export function describeError(error) {
+  try {
+    if (error && typeof error === 'object' && 'message' in error) return String(error.message);
+    return String(error);
+  } catch {
+    return '（无法描述的失败值）';
+  }
+}
+
+/**
+ * Assemble the response body. Pure: the caller passes in what the browser APIs
+ * returned, so the same inputs produce the same context in a test.
+ *
+ * `userAgent` is deliberately reported with its source. A per-tab override (a
+ * DevTools device emulation, for example) changes what the *page* reports while
+ * the extension service worker keeps the browser's own value, so "which
+ * navigator produced this string" is part of the answer.
+ *
+ * Referer gets the same treatment for the same reason: the *fact* is
+ * `document.referrer` as the page itself reports it, and `referer` is only a
+ * **suggested** value derived from the Work Tab URL. A subresource's real
+ * initiator need not be the current top-level page, and only the Service can
+ * decide which is right — inventing a Referer here would be a business judgement
+ * dressed up as browser data.
+ *
+ * `referrerPolicy` is carried best-effort and is `null` on Chrome 153, where the
+ * page-side `document.referrerPolicy` property is `undefined` (measured). The
+ * effective policy therefore cannot be reported, only assumed.
+ *
+ * `observedAt` is passed in rather than read from the clock here, so the module
+ * stays a pure function. It matters to the Service: a signed URL ages, and a
+ * context is only as fresh as the moment it was sampled.
+ *
+ * @param {{
+ *   targetUrl: string,
+ *   scope: string,
+ *   workTabUrl: string,
+ *   cookies: Array<object>,
+ *   userAgent: string | null,
+ *   userAgentSource: string,
+ *   observedAt: string,
+ *   documentReferrer?: string | null,
+ *   referrerPolicy?: string | null,
+ *   serviceWorkerUserAgent?: string | null,
+ * }} input
+ */
+export function buildRequestContext(input) {
+  const cookies = Array.isArray(input.cookies) ? input.cookies : [];
+  const cookieHeader = buildCookieHeader(cookies);
+  const described = describeCookies(cookies);
+  const workTabUrl = typeof input.workTabUrl === 'string' ? input.workTabUrl : '';
+
+  return {
+    targetUrl: input.targetUrl,
+    targetOrigin: new URL(input.targetUrl).origin,
+    scope: input.scope,
+    // Sampled when the browser APIs answered, not when the frame is written.
+    observedAt: input.observedAt,
+    cookieHeader,
+    cookieCount: described.length,
+    httpOnlyCookieCount: described.filter((cookie) => cookie.httpOnly).length,
+    partitionedCookieCount: described.filter((cookie) => cookie.partitioned).length,
+    cookies: described,
+    userAgent: input.userAgent ?? null,
+    userAgentSource: input.userAgentSource,
+    serviceWorkerUserAgent: input.serviceWorkerUserAgent ?? null,
+    // Suggested `Referer`. The Work Tab URL is the only page identity Bridge has;
+    // the fragment cannot appear in a Referer. The page's own view is reported
+    // separately so the Service can weigh both.
+    referer: workTabUrl,
+    workTabUrl,
+    documentReferrer: input.documentReferrer ?? null,
+    referrerPolicy: input.referrerPolicy ?? null,
+  };
+}
