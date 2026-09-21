@@ -143,28 +143,39 @@ export function createResultError(jobId, code, message) {
 }
 
 /**
- * Is this value something the wire format can carry without changing it?
+ * Build the check that decides whether a value is JSON-compatible.
  *
  * `JSON.stringify` succeeding is not the same test: it quietly turns `NaN` and
  * `Infinity` into `null`, drops `undefined`, function-valued, symbol-keyed and
  * non-enumerable properties, flattens a `Map` to `{}` and fills array holes with
  * `null`. Emitting `ok: true` with data the script never returned would be worse
- * than reporting a failure, so the supported types are checked explicitly
- * against what the architecture allows: null, boolean, number, string, array and
- * plain object.
+ * than reporting a failure, so the supported types are checked explicitly against
+ * what the architecture allows: null, boolean, number, string, array and plain
+ * object.
  *
- * **Self-contained on purpose.** `toString()` of this function is injected into
- * the page by the executor, so exactly one implementation decides what a
- * JSON-compatible value is — the check has to run there too, because a value that
- * survives the browser's structured clone has already been changed.
+ * **A factory, and self-contained, on purpose.** Its source is injected into the
+ * page by the executor, where it must be built *before* the Service body runs:
+ * the check reads `Reflect.ownKeys`, `Object.getOwnPropertyDescriptor` and
+ * friends, and the body shares that world, so a body that reassigns them
+ * (`Reflect.ownKeys = () => []`) would otherwise be validating itself. Capturing
+ * them here — in the extension, and in the page before the body exists — means
+ * exactly one implementation decides what a JSON-compatible value is, and nothing
+ * the value does can change the answer.
  *
- * Total by construction: reading a property can run a getter that throws, and a
- * predicate that throws would escape as an unhandled failure instead of a verdict.
- *
- * @param {unknown} value
- * @returns {boolean}
+ * @returns {(value: unknown) => boolean}
  */
-export function isJsonCompatible(value) {
+export function createJsonCompatibilityCheck() {
+  // Captured once, before any value being checked can run code of its own.
+  const ownKeys = Reflect.ownKeys;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = Object.getPrototypeOf;
+  const isArray = Array.isArray;
+  const isFinite = Number.isFinite;
+  const is = Object.is;
+  const objectPrototype = Object.prototype;
+  const toKey = String;
+  const toNumber = Number;
+
   const check = (candidate, path) => {
     if (candidate === null) return true;
 
@@ -176,7 +187,7 @@ export function isJsonCompatible(value) {
         // NaN and Infinity have no JSON spelling; they would silently become
         // null. -0 has one, but not through JSON.stringify, which emits 0 — so it
         // is refused rather than quietly normalized.
-        return Number.isFinite(candidate) && !Object.is(candidate, -0);
+        return isFinite(candidate) && !is(candidate, -0);
       case 'object':
         break;
       default:
@@ -187,18 +198,18 @@ export function isJsonCompatible(value) {
     if (path.indexOf(candidate) !== -1) return false; // a cycle cannot be serialized
     path.push(candidate);
     try {
-      if (Array.isArray(candidate)) {
+      if (isArray(candidate)) {
         // JSON keeps exactly the canonical indices below `length`, so anything
         // else — a hole, a key like `4294967295`, a named property, a symbol key,
         // a non-enumerable index, or a `toJSON` that JSON.stringify would call
         // instead of reading the array — changes the value on the way out.
-        for (const key of Reflect.ownKeys(candidate)) {
+        for (const key of ownKeys(candidate)) {
           if (key === 'length') continue;
           if (typeof key !== 'string') return false;
-          if (String(Number(key)) !== key || Number(key) >= candidate.length) return false;
+          if (toKey(toNumber(key)) !== key || toNumber(key) >= candidate.length) return false;
         }
         for (let index = 0; index < candidate.length; index += 1) {
-          const descriptor = Object.getOwnPropertyDescriptor(candidate, String(index));
+          const descriptor = getOwnPropertyDescriptor(candidate, toKey(index));
           if (descriptor === undefined) return false; // a hole
           if (!descriptor.enumerable) return false;
           // An accessor could yield a different value when it is read again, or
@@ -209,8 +220,8 @@ export function isJsonCompatible(value) {
         return true;
       }
 
-      const prototype = Object.getPrototypeOf(candidate);
-      if (prototype !== Object.prototype && prototype !== null) {
+      const prototype = getPrototypeOf(candidate);
+      if (prototype !== objectPrototype && prototype !== null) {
         // Date, Map, Set, RegExp, typed arrays, DOM nodes: all of them change
         // shape on the way out, so none of them is "the value the script returned".
         return false;
@@ -221,9 +232,9 @@ export function isJsonCompatible(value) {
       // tell. An accessor is rejected as well because reading it twice can yield
       // two different values: the one that was validated need not be the one that
       // gets sent.
-      for (const key of Reflect.ownKeys(candidate)) {
+      for (const key of ownKeys(candidate)) {
         if (typeof key !== 'string') return false;
-        const descriptor = Object.getOwnPropertyDescriptor(candidate, key);
+        const descriptor = getOwnPropertyDescriptor(candidate, key);
         if (!descriptor.enumerable) return false;
         if (descriptor.get !== undefined || descriptor.set !== undefined) return false;
         if (!check(descriptor.value, path)) return false;
@@ -234,14 +245,19 @@ export function isJsonCompatible(value) {
     }
   };
 
-  try {
-    return check(value, []);
-  } catch {
-    // A value whose contents cannot even be inspected is not one Bridge can
-    // promise to deliver unchanged.
-    return false;
-  }
+  return (value) => {
+    try {
+      return check(value, []);
+    } catch {
+      // A value whose contents cannot even be inspected is not one Bridge can
+      // promise to deliver unchanged.
+      return false;
+    }
+  };
 }
+
+/** The check the extension uses; see `createJsonCompatibilityCheck`. */
+export const isJsonCompatible = createJsonCompatibilityCheck();
 
 /**
  * @param {string} state one of IDLE / RUNNING / NOT_READY

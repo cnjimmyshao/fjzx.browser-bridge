@@ -372,6 +372,37 @@ test('the in-page check is the very same rule the Bridge applies', () => {
 
   // One implementation, injected: the check has to run before the structured
   // clone rewrites anything, and it must not drift from the Bridge-side rule.
-  assert.match(code, /const isJsonCompatible = function isJsonCompatible/);
+  assert.match(code, /const isJsonCompatible = \(function createJsonCompatibilityCheck/);
   assert.match(code, /isJsonCompatible\(delivered\)/);
+});
+
+test('the check survives a body that reassigns the intrinsics it reads', async () => {
+  // Only `Node` is injected: the vm context has its own Reflect/Object, so the
+  // body patches the same realm the check captured from.
+  const api = createSimulatingApi({ sandbox: { Node: FakeNode } });
+  const { executor } = createExecutor({ api });
+
+  // The check is built before the body runs, so patching the globals it reads
+  // cannot make it accept a value the browser would silently rewrite.
+  await assert.rejects(
+    () =>
+      executor.execute({
+        tabId: 1,
+        script: "Reflect.ownKeys = () => []; return { node: new Node() };",
+        input: null,
+      }),
+    /JSON-compatible/,
+  );
+});
+
+test('a body that patches globals does not disturb an honest result', async () => {
+  const { executor } = createExecutor();
+
+  const value = await executor.execute({
+    tabId: 1,
+    script: "Reflect.ownKeys = () => []; return { ok: true };",
+    input: null,
+  });
+
+  assert.deepEqual(asWire(value), { ok: true });
 });

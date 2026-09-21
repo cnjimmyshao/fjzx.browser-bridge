@@ -1,4 +1,4 @@
-import { isJsonCompatible } from './protocol.js';
+import { createJsonCompatibilityCheck } from './protocol.js';
 
 /**
  * Execute Service JavaScript in the Work Tab through Chrome's userScripts API.
@@ -64,7 +64,10 @@ export function wrapScript(script, input) {
   const inputJson = JSON.stringify(input === undefined ? null : input);
 
   return `(async (input) => {
-  const isJsonCompatible = ${isJsonCompatible.toString()};
+  // Built before the Service body runs, so the body cannot swap out the intrinsics
+  // the check reads. From here on the body shares this world with the check, and
+  // rebuilding it afterwards would let a body validate itself.
+  const isJsonCompatible = (${createJsonCompatibilityCheck.toString()})();
   const envelope = (payload) => Object.assign({ [${toSourceLiteral(ENVELOPE_MARKER)}]: true }, payload);
   const describe = (error) => {
     try {
