@@ -10,6 +10,7 @@ import {
   describeCookies,
   findDuplicateCookieNames,
   isSameOrigin,
+  isSameSite,
   maskCookieHeader,
   mergeCookieSets,
   normalizeScope,
@@ -153,39 +154,66 @@ test('normalizeTopLevelSite keeps the origin, and mergeCookieSets concatenates p
 
 test('resolvePartitionKey always names exactly one partition', () => {
   // No partition query at all when the caller opts out.
-  assert.deepEqual(resolvePartitionKey({ workTabUrl: WORK_TAB_URL, topLevelSite: null }), {
+  assert.deepEqual(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: null }), {
     ok: true,
     partitionKey: null,
   });
 
-  // The default describes a request the Work Tab's own document makes, and by
-  // design the top-level context is never a cross-site ancestor — whether or not
-  // the target is on another site. Deriving it from the target's site would get
-  // sibling subdomains and cross-site CDNs wrong in opposite directions.
-  assert.deepEqual(resolvePartitionKey({ workTabUrl: WORK_TAB_URL }), {
+  // Same site (ports ignored): the request is not cross-site, so neither is the bit.
+  assert.deepEqual(resolvePartitionKey({ targetUrl: `${WORK_TAB_ORIGIN}/media/1`, workTabUrl: WORK_TAB_URL }), {
     ok: true,
     partitionKey: { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
   });
-
-  // A request made from a third-party frame carries the bit.
   assert.deepEqual(
-    resolvePartitionKey({ workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: true }).partitionKey,
+    resolvePartitionKey({ targetUrl: 'https://app.test:8443/x', workTabUrl: WORK_TAB_URL }).partitionKey,
+    { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
+  );
+
+  // A sibling subdomain is a different origin but the *same site* — deriving from
+  // origins would wrongly look in the cross-site partition.
+  assert.deepEqual(
+    resolvePartitionKey({ targetUrl: 'https://cdn.example.com/x', workTabUrl: 'https://app.example.com/feed' }).partitionKey,
+    { topLevelSite: 'https://app.example.com', hasCrossSiteAncestor: false },
+  );
+
+  // A genuinely cross-site target does use the cross-site partition (measured: this
+  // is the case where Chrome sends the third-party frame's cookie).
+  assert.deepEqual(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL }), {
+    ok: true,
+    partitionKey: { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: true },
+  });
+
+  // An explicit bit always wins — the escape hatch for the cases the PSL-free site
+  // approximation cannot see (multi-label public suffixes such as `a.co.uk`).
+  assert.deepEqual(
+    resolvePartitionKey({ targetUrl: `${WORK_TAB_ORIGIN}/a`, workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: true }).partitionKey,
     { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: true },
   );
-  // An explicit false is honoured too (it is not nullish).
   assert.deepEqual(
-    resolvePartitionKey({ workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: false }).partitionKey,
+    resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: false }).partitionKey,
     { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
   );
 
   // An explicit site replaces the Work Tab default.
   assert.deepEqual(
-    resolvePartitionKey({ workTabUrl: WORK_TAB_URL, topLevelSite: 'https://other.test/x' }).partitionKey,
-    { topLevelSite: 'https://other.test', hasCrossSiteAncestor: false },
+    resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'https://other.test/x' }).partitionKey,
+    { topLevelSite: 'https://other.test', hasCrossSiteAncestor: true },
   );
 
-  assert.equal(resolvePartitionKey({ workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: 'yes' }).ok, false);
-  assert.equal(resolvePartitionKey({ workTabUrl: WORK_TAB_URL, topLevelSite: 'nope' }).ok, false);
+  assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: 'yes' }).ok, false);
+  assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'nope' }).ok, false);
+});
+
+test('isSameSite compares scheme and registrable host, not origins', () => {
+  assert.equal(isSameSite('https://app.test:8443/a', 'https://app.test/b'), true, '端口不构成不同站点');
+  assert.equal(isSameSite('https://cdn.example.com/a', 'https://app.example.com/b'), true, '同注册域的子域同站');
+  assert.equal(isSameSite('http://app.test/a', 'https://app.test/b'), false, 'schemeful site');
+  assert.equal(isSameSite('http://127.0.0.1:8080/a', 'http://localhost:8080/b'), false, 'IP 与主机名不同站');
+  assert.equal(isSameSite('http://127.0.0.1:8080/a', 'http://127.0.0.1:9090/b'), true, 'IP 字面量按自身比较');
+  assert.equal(isSameSite('not a url', 'https://app.test'), false);
+  // Documented limitation: without a public suffix list, two registrable domains
+  // under a multi-label suffix look like one site. An explicit bit is the escape.
+  assert.equal(isSameSite('https://a.co.uk/x', 'https://b.co.uk/y'), true);
 });
 
 test('duplicate cookie names are surfaced instead of silently ordered', () => {
@@ -383,13 +411,15 @@ test('partitioned cookies are merged in, and an explicit null skips the partitio
     topLevelSite: 'https://top.test/page',
   });
   assert.equal(named.ok, true);
+  // The target is cross-site relative to the named top-level site, so the derived
+  // bit is true — the same rule as the default, applied to the caller's site.
   assert.deepEqual(stub.calls.getAll.at(-1).partitionKey, {
     topLevelSite: 'https://top.test',
-    hasCrossSiteAncestor: false,
+    hasCrossSiteAncestor: true,
   });
 
-  // A cross-site target keeps the top-level bit: the request still comes from the
-  // Work Tab's own document, and it is the caller that says otherwise.
+  // A cross-site target keeps its own (cross-site) partition: deriving the bit from
+  // the two sites is what makes this land in the partition Chrome uses.
   const crossOrigin = await source.read({
     tabId: 1,
     targetUrl: 'https://cdn.test/media/1',
@@ -398,7 +428,7 @@ test('partitioned cookies are merged in, and an explicit null skips the partitio
   assert.equal(crossOrigin.ok, true);
   assert.deepEqual(stub.calls.getAll.at(-1).partitionKey, {
     topLevelSite: WORK_TAB_ORIGIN,
-    hasCrossSiteAncestor: false,
+    hasCrossSiteAncestor: true,
   });
 });
 
@@ -464,7 +494,7 @@ test('a navigation during the sample is retried, and never answered with a mixtu
   // The partition follows the page the answer actually describes.
   assert.deepEqual(retried.calls.getAll.at(-1).partitionKey, {
     topLevelSite: 'https://moved.test',
-    hasCrossSiteAncestor: false,
+    hasCrossSiteAncestor: true,
   });
 
   // With the strict scope the same race ends in a refusal, not in a mixture: the
@@ -493,13 +523,17 @@ test('a navigation during the sample is retried, and never answered with a mixtu
   assert.match(mixed.message, /导航/);
 });
 
-test('an unscriptable page still answers, and says which user agent it used', async () => {
+test('an unscriptable page is an error, not a context with the worker user agent', async () => {
+  // The usual cause is that the operator restricted the extension's access to this
+  // site — and host access is shared with `chrome.cookies`, so the cookie set would
+  // be silently filtered too. Answering `ok: true` would look complete while being
+  // wrong about both the user agent and the cookies.
   const stub = createStubChrome({ failScripting: true, cookies: [{ name: 'sid', value: 's', path: '/' }] });
   const outcome = await createSource(stub).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
 
-  assert.equal(outcome.ok, true);
-  assert.equal(outcome.context.userAgentSource, USER_AGENT_SOURCES.SERVICE_WORKER);
-  assert.equal(outcome.context.documentReferrer, null);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+  assert.match(outcome.message, /无法读取 Work Tab 页面/);
 });
 
 test('reports NOT_READY and CONTEXT_FAILED instead of throwing', async () => {
@@ -771,6 +805,33 @@ test('forwards the provider error and refuses a context JSON would rewrite', asy
   await unserializable.bridge.handleMessage(askContext('rc-8'));
   assert.equal(unserializable.connection.sent.at(-1).ok, false);
   assert.equal(unserializable.connection.sent.at(-1).error.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+});
+
+test('a context is not disclosed when the Work Tab binding changed while it was read', async () => {
+  const workTab = createFakeWorkTab();
+  const connection = createFakeConnection();
+  const slow = {
+    isAvailable: () => true,
+    async read() {
+      // A second ordinary tab opens while cookies and page facts are being read, so
+      // Bridge becomes NOT_READY for exactly this request.
+      workTab.set({ isBound: false, tabId: null, reason: 'MULTIPLE_TABS' });
+      return { ok: true, context: { targetUrl: 'https://app.test/media/1' } };
+    },
+  };
+  const bridge = createBridgeState({
+    connection,
+    workTab,
+    executor: createControlledExecutor(),
+    requestContext: slow,
+  });
+
+  await bridge.handleMessage(askContext('rc-11'));
+
+  assert.equal(connection.sent.at(-1).type, 'REQUEST_CONTEXT');
+  assert.equal(connection.sent.at(-1).ok, false);
+  assert.equal(connection.sent.at(-1).error.code, CONTEXT_ERROR_CODES.NOT_READY);
+  assert.match(connection.sent.at(-1).error.message, /MULTIPLE_TABS/);
 });
 
 test('a context reply is dropped when the endpoint changed while it was served', async () => {

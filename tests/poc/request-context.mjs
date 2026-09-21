@@ -375,27 +375,30 @@ try {
     );
     assert.equal(sent.secFetchSite, 'cross-site');
 
-    // The default bit describes a request the **Work Tab's own document** makes, and
-    // this cookie was written from a third-party frame, so the default partition
-    // must NOT hand it over.
+    // Default partition: the Work Tab's own origin, with the bit derived from the two
+    // schemeful sites (`127.0.0.1` vs `localhost` → cross-site). That is the partition
+    // Chrome itself used for the cross-site fetch above, so the cookie must be here.
     const byDefault = await requestContext(protectedSite.altMediaUrl, { scope: 'TARGET_ONLY' });
-    assert.ok(
-      !byDefault.context.cookies.some((cookie) => cookie.name === 'part'),
-      '默认（顶层上下文，bit=false）不得返回第三方 frame 分区里的 cookie',
+    assert.deepEqual(
+      byDefault.context.cookies.map((cookie) => cookie.name),
+      ['part'],
+      `默认分区应恰好取到第三方 frame 写入的那个 cookie，实际：${JSON.stringify(byDefault.context.cookies)}`,
+    );
+    assert.equal(byDefault.context.partitionedCookieCount, 1);
+    assert.equal(
+      byDefault.context.cookies[0].topLevelSite,
+      protectedSite.origin.replace(/:\d+$/, ''),
     );
 
-    // Naming the frame's partition — same site, the other ancestor bit — returns
-    // exactly that cookie, and nothing else.
-    const byFramePartition = await requestContext(protectedSite.altMediaUrl, {
+    // The other value of the bit is a **different** partition: it must not hand over
+    // the cookie that belongs to this one.
+    const otherBit = await requestContext(protectedSite.altMediaUrl, {
       scope: 'TARGET_ONLY',
-      hasCrossSiteAncestor: true,
+      hasCrossSiteAncestor: false,
     });
-    const names = byFramePartition.context.cookies.map((cookie) => cookie.name);
-    assert.deepEqual(names, ['part'], `只有第三方 frame 那一分区应有这个 cookie，实际：${JSON.stringify(names)}`);
-    assert.equal(byFramePartition.context.partitionedCookieCount, 1);
-    assert.equal(
-      byFramePartition.context.cookies[0].topLevelSite,
-      protectedSite.origin.replace(/:\d+$/, ''),
+    assert.ok(
+      !otherBit.context.cookies.some((cookie) => cookie.name === 'part'),
+      '另一位（同一顶层站点、另一分区）不得返回本分区的 cookie',
     );
 
     const withoutPartition = await requestContext(protectedSite.altMediaUrl, { scope: 'TARGET_ONLY', topLevelSite: null });
@@ -406,10 +409,10 @@ try {
 
     observe('分区 cookie 的可见性', {
       browserSentItCrossSite: true,
-      defaultTopLevelBit: byDefault.context.cookies.map((cookie) => cookie.name),
-      crossSiteAncestorBit: byFramePartition.context.cookies,
+      derivedBit: byDefault.context.cookies,
+      otherBit: otherBit.context.cookies.map((cookie) => cookie.name),
       withoutPartition: withoutPartition.context.cookies.map((cookie) => cookie.name),
-      note: '同一个 URL：两位取值指向不同分区，互不包含。',
+      note: '同一个 URL：两位取值指向不同分区，互不包含；默认按 schemeful site 推导。',
     });
   });
 

@@ -1,8 +1,8 @@
 {
-  "at": "2026-09-21T14:18:46.396Z",
+  "at": "2026-09-21T14:36:07.380Z",
   "extension": "D:\\nodejs\\com.fajiezhixin.browser-bridge\\src",
-  "service": "ws://127.0.0.1:6639",
-  "origin": "http://127.0.0.1:6638",
+  "service": "ws://127.0.0.1:34216",
+  "origin": "http://127.0.0.1:34215",
   "summary": {
     "total": 15,
     "passed": 15,
@@ -92,7 +92,7 @@
           "sec-fetch-site": "same-origin",
           "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
         },
-        "referer": "http://127.0.0.1:6638/feed",
+        "referer": "http://127.0.0.1:34215/feed",
         "cookieNames": [
           "sid",
           "theme",
@@ -140,7 +140,7 @@
           }
         ],
         "userAgentSource": "work-tab-page",
-        "observedAt": "2026-09-21T14:18:44.390Z"
+        "observedAt": "2026-09-21T14:36:05.410Z"
       }
     },
     {
@@ -148,7 +148,7 @@
       "detail": {
         "status": 200,
         "bytes": 65536,
-        "digest": "ef37a5833ea881e56da86609726507c60e270cb21af6dbd1e0e518bdb6007d7a"
+        "digest": "05ac365e20cc6c39bd1361308a644de97b5f1a427b8c3e583cab1bc35955e1d9"
       }
     },
     {
@@ -163,8 +163,7 @@
       "name": "分区 cookie 的可见性",
       "detail": {
         "browserSentItCrossSite": true,
-        "defaultTopLevelBit": [],
-        "crossSiteAncestorBit": [
+        "derivedBit": [
           {
             "name": "part",
             "domain": "localhost",
@@ -177,8 +176,9 @@
             "topLevelSite": "http://127.0.0.1"
           }
         ],
+        "otherBit": [],
         "withoutPartition": [],
-        "note": "同一个 URL：两位取值指向不同分区，互不包含。"
+        "note": "同一个 URL：两位取值指向不同分区，互不包含；默认按 schemeful site 推导。"
       }
     },
     {

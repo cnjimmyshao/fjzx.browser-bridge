@@ -182,6 +182,39 @@ export function mergeCookieSets(unpartitioned, partitioned) {
 }
 
 /**
+ * The host that identifies a "site" for scheme-and-site comparisons.
+ *
+ * A registrable domain needs a public suffix list, which Bridge deliberately does
+ * not carry: the last two labels are a good approximation for ordinary domains
+ * (`www.example.com` and `cdn.example.com` → `example.com`) and exact for IP
+ * literals and single-label hosts (`127.0.0.1`, `localhost`). The approximation is
+ * wrong for multi-label public suffixes (`a.co.uk` and `b.co.uk` are different
+ * sites), which is exactly why the caller can override the ancestor bit.
+ */
+function siteHost(hostname) {
+  if (hostname.includes(':')) return hostname; // IPv6 literal
+  if (/^\d+(\.\d+){3}$/.test(hostname)) return hostname; // IPv4 literal
+  const labels = hostname.split('.');
+  return labels.length <= 2 ? hostname : labels.slice(-2).join('.');
+}
+
+/**
+ * Are two URLs the same **schemeful site** (scheme + registrable domain)?
+ *
+ * Ports are ignored, which is the point: a site is not an origin. See `siteHost`
+ * for what "registrable domain" costs here.
+ */
+export function isSameSite(a, b) {
+  try {
+    const left = new URL(a);
+    const right = new URL(b);
+    return left.protocol === right.protocol && siteHost(left.hostname) === siteHost(right.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Pick the **one** CHIPS partition a replayed request belongs to.
  *
  * A partition key is not just the top-level site: since Chrome 130 it also carries
@@ -190,16 +223,15 @@ export function mergeCookieSets(unpartitioned, partitioned) {
  * partition the request is not in, and a duplicate name would silently produce a
  * wrong `Cookie` header.
  *
- * The bit describes the **request's frame ancestry**, not the target's site:
- * by design the top-level context is always `false`, and a cookie is `true` only
- * when it was reached through a third-party context. A request the Work Tab's own
- * document makes — the case this capability exists for, including a cross-site
- * subresource — therefore has `false`, while a request made from a third-party
- * frame needs `true`. Deriving it from "is the target cross-origin/cross-site"
- * would get it wrong in both directions, which is why the default is simply the
- * top-level one and the caller can override it.
+ * The bit says whether the request is cross-site relative to the top-level site,
+ * so the default is derived from the two **schemeful sites** — not from origins
+ * (a sibling subdomain or another port is still the same site) and not as a
+ * constant (a cross-site target from the top-level document really does use the
+ * cross-site partition; measured). An explicit value always wins, which is the
+ * escape hatch for the cases the PSL-free approximation gets wrong.
  *
  * @param {{
+ *   targetUrl: string,
  *   workTabUrl: string,
  *   topLevelSite?: unknown,
  *   hasCrossSiteAncestor?: unknown,
@@ -222,7 +254,8 @@ export function resolvePartitionKey(input) {
     ok: true,
     partitionKey: {
       topLevelSite: site.topLevelSite,
-      hasCrossSiteAncestor: input.hasCrossSiteAncestor ?? false,
+      hasCrossSiteAncestor:
+        input.hasCrossSiteAncestor ?? !isSameSite(input.targetUrl, site.topLevelSite),
     },
   };
 }

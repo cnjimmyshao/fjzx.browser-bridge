@@ -32,7 +32,14 @@ import {
 
 /** Where the reported user agent came from. Part of the answer, not a detail. */
 export const USER_AGENT_SOURCES = Object.freeze({
+  /** The Work Tab page's own navigator — the only source this module produces. */
   PAGE: 'work-tab-page',
+  /**
+   * The extension worker's own navigator. Kept as a value because a context can
+   * legitimately be *described* with it (and the field documents which navigator
+   * answered), but `read()` no longer degrades to it: an unreadable page is an
+   * error, not a context with the wrong user agent.
+   */
   SERVICE_WORKER: 'extension-service-worker',
 });
 
@@ -104,6 +111,15 @@ export function createRequestContextSource(options = {}) {
     }
   }
 
+  /**
+   * Read the page's own facts, or say why they are not available.
+   *
+   * A failure here is **not** degraded to the worker's own user agent any more: the
+   * usual cause is that the operator restricted the extension's access to this
+   * site, and host access is shared with `chrome.cookies` — an answer built from
+   * the worker's navigator would look complete while the cookie set behind it is
+   * silently filtered. Reporting the failure is the only honest option.
+   */
   async function readPageFacts(tabId) {
     const { scripting } = resolveApis();
     try {
@@ -112,14 +128,14 @@ export function createRequestContextSource(options = {}) {
         func: readPageFactsInPage,
       });
       const value = results?.[0]?.result;
-      if (value && typeof value.userAgent === 'string' && value.userAgent !== '') return value;
-      return null;
+      if (value && typeof value.userAgent === 'string' && value.userAgent !== '') {
+        return { ok: true, facts: value };
+      }
+      return { ok: false, reason: '页面没有返回可用的信息。' };
     } catch (error) {
-      // A page the extension may not script yet must not fail the whole request:
-      // the worker's own user agent is a fallback, and the answer says which one
-      // was used.
-      logger.warn?.(`[bridge] page facts unavailable: ${describeError(error)}`);
-      return null;
+      const reason = `扩展无法在此页面执行脚本（通常是用户限制了该站点的访问权限）：${describeError(error)}`;
+      logger.warn?.(`[bridge] page facts unavailable: ${reason}`);
+      return { ok: false, reason };
     }
   }
 
@@ -145,6 +161,7 @@ export function createRequestContextSource(options = {}) {
     // Partitioned (CHIPS) cookies are invisible to a `url`-only query, so the
     // partition has to be named — and named exactly, see `resolvePartitionKey`.
     const partition = resolvePartitionKey({
+      targetUrl: target.url,
       workTabUrl: workTab.url,
       topLevelSite: request.topLevelSite,
       hasCrossSiteAncestor: request.hasCrossSiteAncestor,
@@ -164,14 +181,16 @@ export function createRequestContextSource(options = {}) {
       return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `chrome.cookies 读取失败：${describeError(error)}`);
     }
 
-    const pageFacts = await readPageFacts(request.tabId);
+    const facts = await readPageFacts(request.tabId);
+    if (!facts.ok) return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `无法读取 Work Tab 页面：${facts.reason}`);
+    const pageFacts = facts.facts;
 
     // The *document* the facts came from must be the document the cookies were read
     // for. Comparing origins alone would accept a same-origin navigation
     // (`/feed` → `/account`) and then answer with the old URL as the suggested
     // Referer while the facts describe the new page. A mismatch is not an error the
     // Service can act on — it is a race — so the caller retries once.
-    const factsPage = normalizeTargetUrl(pageFacts?.pageUrl);
+    const factsPage = normalizeTargetUrl(pageFacts.pageUrl);
     if (factsPage.ok && factsPage.url !== workTab.url) return { retry: true };
     const after = await readWorkTabUrl(request.tabId);
     if (!after.ok || after.url !== workTab.url) return { retry: true };
@@ -181,11 +200,11 @@ export function createRequestContextSource(options = {}) {
       scope: scope.scope,
       workTabUrl: workTab.url,
       cookies: all,
-      userAgent: pageFacts?.userAgent ?? navigator.userAgent,
-      userAgentSource: pageFacts ? USER_AGENT_SOURCES.PAGE : USER_AGENT_SOURCES.SERVICE_WORKER,
+      userAgent: pageFacts.userAgent,
+      userAgentSource: USER_AGENT_SOURCES.PAGE,
       observedAt: new Date().toISOString(),
-      documentReferrer: pageFacts?.documentReferrer ?? null,
-      referrerPolicy: pageFacts?.referrerPolicy ?? null,
+      documentReferrer: pageFacts.documentReferrer ?? null,
+      referrerPolicy: pageFacts.referrerPolicy ?? null,
       serviceWorkerUserAgent: navigator.userAgent,
     });
 

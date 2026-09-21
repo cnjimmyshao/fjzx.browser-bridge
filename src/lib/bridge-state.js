@@ -219,6 +219,10 @@ export function createBridgeState({
       return;
     }
 
+    // The tab this context is sampled from, remembered so the answer can be checked
+    // against the binding it was taken under.
+    const sampledTabId = workTab.tabId;
+
     let outcome;
     try {
       outcome = await requestContext.read({
@@ -234,6 +238,21 @@ export function createBridgeState({
           message.requestId,
           CONTEXT_ERROR_CODES.CONTEXT_FAILED,
           `读取请求上下文时出现意外错误：${describeError(error)}`,
+        ),
+      );
+      return;
+    }
+
+    // Reading cookies and page facts is asynchronous, and the tab set can change
+    // while it runs: a second ordinary tab makes Bridge NOT_READY for exactly this
+    // request. Answering anyway would disclose a context sampled from a tab it can
+    // no longer identify — data the Service could not have obtained a moment later.
+    if (!workTab.isBound || workTab.tabId !== sampledTabId) {
+      reply(
+        createRequestContextError(
+          message.requestId,
+          CONTEXT_ERROR_CODES.NOT_READY,
+          `Work Tab 绑定在采样期间发生了变化（${workTab.reason ?? 'UNKNOWN'}）。`,
         ),
       );
       return;
