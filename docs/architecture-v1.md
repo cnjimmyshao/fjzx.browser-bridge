@@ -271,6 +271,8 @@ POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-e
 
 **问题**：页面里发现一个资源 URL 后，Service 想用自己的 Node 后端把它下下来。普通页面 JavaScript 拿不到 HttpOnly Cookie，因此需要 Bridge 以**通用、最小权限**的方式回答"浏览器会为这个 URL 发送什么"。Bridge 不因此理解任何网站、媒体或业务概念：它只知道 URL 与浏览器当前状态。
 
+> 措辞上的诚实：`chrome.cookies` 给的是"**存储中匹配该 URL 的 cookie 全集**"，不是"浏览器此刻会发送的集合"——SameSite 与第三方拦截都不参与读取，所以 Service 可能拿到浏览器本会扣下的 cookie。要真正复现浏览器的发送行为，需要 Service 侧再套一层策略。
+
 **新增的消息对**（Service → Bridge 请求，Bridge → Service 应答）：
 
 ```json
@@ -294,6 +296,6 @@ POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-e
 
 **权限**：新增 `cookies`（`cookies` 权限本身不新增安装警告）与 `scripting`（读 Work Tab 页面自己的 UA / referrer，worker 代答不了）。读取范围由 `chrome.cookies.getAll({ url })` 与 host 权限共同限制：**Bridge 从不用 `getAll({})` 或 `getAll({domain})`**。
 
-**实测约束**：HttpOnly 可读；SameSite 不影响读取；**分区（CHIPS）cookie 必须给出完整的分区键** —— 只有 `topLevelSite` 会同时命中 `hasCrossSiteAncestor` 的两种取值（两个分区都有同名 cookie 时会一起返回），因此请求可以带 `hasCrossSiteAncestor`，默认按两个 schemeful site 推导（同站 → `false`，跨站 → `true`；"可注册域"是无 PSL 的末两段近似，例外情况由调用方显式传值）；UA 必须取自页面，**页面读不到就是失败**（用户限制站点访问时 `chrome.cookies` 同时被静默过滤，不能降级成 worker 的 UA）；一次采样必须来自同一个**文档**（中途导航——包括同源换路径——会重试一次，仍不一致则报 `CONTEXT_FAILED`）；采样期间出现第二个普通 Tab 会让绑定失效，此时返回 `NOT_READY` 而不是披露旧绑定的上下文；同名 cookie 无法复现 Chrome 在同一 path 长度内的创建时间顺序，实现用 `duplicateCookieNames` 显式报告冲突；cookie 值不落盘也不进日志。
+**实测约束**：HttpOnly 可读；SameSite 不影响读取（产物是"存储中匹配的全集"，见上）；**分区（CHIPS）cookie 必须给出完整的分区键** —— 只有 `topLevelSite` 会同时命中 `hasCrossSiteAncestor` 的两种取值（两个分区都有同名 cookie 时会一起返回），因此请求可以带 `hasCrossSiteAncestor`，默认按两个 schemeful site 推导（同站 → `false`，跨站 → `true`；"可注册域"是无 PSL 的末两段近似，例外情况由调用方显式传值；非法 boolean 一律 `INVALID_PARTITION`，`topLevelSite: null` 也不豁免校验）；UA 必须取自页面，**页面读不到就是失败**（用户限制站点访问时 `chrome.cookies` 同时被静默过滤，不能降级成 worker 的 UA）；**目标站点的访问权限单独校验**（跨源时 Work Tab 可读不代表 CDN 的 cookie 可见，`chrome.permissions.contains` 说不通过就报错，而不是交一个空集合）；一次采样必须来自同一个**文档**（中途导航——包括同源换路径——会重试一次，仍不一致则报 `CONTEXT_FAILED`）；采样期间出现第二个普通 Tab 会让绑定失效，此时返回 `NOT_READY` 而不是披露旧绑定的上下文；同名 cookie 无法复现 Chrome 在同一 path 长度内的创建时间顺序，实现用 `duplicateCookieNames` 显式报告冲突；cookie 值不落盘也不进日志。
 
 **验证**：`npm run poc:context`（= `node tests/poc/request-context.mjs`）在真实扩展上跑 15 个场景，含反例与"RUNNING 期间取上下文不影响 Job"；证据写在 `docs/research/evidence/request-context.json`。`npm run poc` 的 12 个 V1 场景不受影响。

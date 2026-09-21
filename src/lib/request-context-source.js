@@ -83,12 +83,18 @@ export function createRequestContextSource(options = {}) {
 
   function resolveApis() {
     if (injected) {
-      return { cookies: options.cookies, tabs: options.tabs, scripting: options.scripting };
+      return {
+        cookies: options.cookies,
+        tabs: options.tabs,
+        scripting: options.scripting,
+        permissions: Object.hasOwn(options, 'permissions') ? options.permissions : undefined,
+      };
     }
     return {
       cookies: globalThis.chrome?.cookies,
       tabs: globalThis.chrome?.tabs,
       scripting: globalThis.chrome?.scripting,
+      permissions: globalThis.chrome?.permissions,
     };
   }
 
@@ -108,6 +114,27 @@ export function createRequestContextSource(options = {}) {
       return { ok: true, url: url.url };
     } catch (error) {
       return { ok: false, reason: `Work Tab 已不可读：${describeError(error)}` };
+    }
+  }
+
+  /**
+   * Does the extension still have access to this origin?
+   *
+   * `chrome.cookies.getAll` filters **silently** by host permission, so with site
+   * access withheld it answers "no cookies" instead of failing — and for a
+   * cross-origin target the Work Tab's own access says nothing about the target's.
+   * Asking explicitly is the only way to tell "this URL has no cookies" from "we
+   * are not allowed to see them". When the API is not injected the check is skipped
+   * and the answer says nothing about access.
+   */
+  async function hasHostAccess(origin) {
+    const { permissions } = resolveApis();
+    if (typeof permissions?.contains !== 'function') return { ok: true, verified: false };
+    try {
+      const granted = await permissions.contains({ origins: [`${origin}/*`] });
+      return { ok: granted === true, verified: true };
+    } catch (error) {
+      return { ok: false, verified: true, reason: describeError(error) };
     }
   }
 
@@ -167,6 +194,17 @@ export function createRequestContextSource(options = {}) {
       hasCrossSiteAncestor: request.hasCrossSiteAncestor,
     });
     if (!partition.ok) return fail(CONTEXT_ERROR_CODES.INVALID_PARTITION, partition.reason);
+
+    // Access is per origin, so a cross-origin target needs its own check: the Work
+    // Tab being scriptable says nothing about whether the CDN's cookies are visible.
+    const targetOrigin = new URL(target.url).origin;
+    const access = await hasHostAccess(targetOrigin);
+    if (!access.ok) {
+      return fail(
+        CONTEXT_ERROR_CODES.CONTEXT_FAILED,
+        `扩展对目标站点没有访问权限（${targetOrigin}），无法保证 cookie 集合完整${access.reason === undefined ? '。' : `：${access.reason}`}`,
+      );
+    }
 
     const { cookies } = resolveApis();
     let all;

@@ -239,11 +239,13 @@ export function isSameSite(a, b) {
  * @returns {{ok: true, partitionKey: object | null} | {ok: false, reason: string}}
  */
 export function resolvePartitionKey(input) {
-  if (input.topLevelSite === null) return { ok: true, partitionKey: null };
-
+  // Validated before the opt-out: a malformed request must be rejected, not
+  // reinterpreted as "no partition lookup" just because the site was omitted.
   if (input.hasCrossSiteAncestor !== undefined && typeof input.hasCrossSiteAncestor !== 'boolean') {
     return { ok: false, reason: 'hasCrossSiteAncestor 必须是 boolean 或省略。' };
   }
+
+  if (input.topLevelSite === null) return { ok: true, partitionKey: null };
 
   const site = normalizeTopLevelSite(
     input.topLevelSite === undefined ? input.workTabUrl : input.topLevelSite,

@@ -201,6 +201,11 @@ test('resolvePartitionKey always names exactly one partition', () => {
   );
 
   assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: 'yes' }).ok, false);
+  // The opt-out does not excuse a malformed bit: rejecting beats reinterpreting.
+  assert.equal(
+    resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: null, hasCrossSiteAncestor: 'yes' }).ok,
+    false,
+  );
   assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'nope' }).ok, false);
 });
 
@@ -305,11 +310,13 @@ function createStubChrome({
   failCookies = false,
   failScripting = false,
   tabMissing = false,
+  denyTargetAccess = false,
+  withPermissionsApi = true,
 } = {}) {
-  const calls = { getAll: [], executeScript: [], get: [] };
+  const calls = { getAll: [], executeScript: [], get: [], contains: [] };
   let tabReads = 0;
   let factReads = 0;
-  return {
+  const stub = {
     calls,
     cookies: {
       async getAll(details) {
@@ -340,10 +347,25 @@ function createStubChrome({
       },
     },
   };
+  if (withPermissionsApi) {
+    stub.permissions = {
+      async contains({ origins }) {
+        calls.contains.push(origins);
+        return !denyTargetAccess;
+      },
+    };
+  }
+  return stub;
 }
 
 function createSource(stub) {
-  return createRequestContextSource({ cookies: stub.cookies, tabs: stub.tabs, scripting: stub.scripting, logger: {} });
+  return createRequestContextSource({
+    cookies: stub.cookies,
+    tabs: stub.tabs,
+    scripting: stub.scripting,
+    ...(stub.permissions === undefined ? {} : { permissions: stub.permissions }),
+    logger: {},
+  });
 }
 
 test('available only when all three browser APIs are present', () => {
@@ -521,6 +543,39 @@ test('a navigation during the sample is retried, and never answered with a mixtu
   assert.equal(mixed.ok, false);
   assert.equal(mixed.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
   assert.match(mixed.message, /导航/);
+});
+
+test('withheld access to a cross-origin target is reported, not answered with an empty set', async () => {
+  // Site access is per origin: the Work Tab stays scriptable while the CDN's cookies
+  // are filtered out silently, so "no cookies" and "not allowed to look" are
+  // indistinguishable from the result alone.
+  const denied = createStubChrome({ denyTargetAccess: true, cookies: [{ name: 'sid', value: 's', path: '/' }] });
+  const refused = await createSource(denied).read({
+    tabId: 1,
+    targetUrl: 'https://cdn.test/media/1',
+    scope: TARGET_SCOPES.TARGET_ONLY,
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+  assert.match(refused.message, /没有访问权限/);
+  assert.deepEqual(denied.calls.contains, [['https://cdn.test/*']]);
+  assert.deepEqual(denied.calls.getAll, [], '越权时不应再读 cookie');
+
+  // Granted access asks the same question and proceeds.
+  const granted = createStubChrome({ cookies: [{ name: 'sid', value: 's', path: '/' }] });
+  const allowed = await createSource(granted).read({
+    tabId: 1,
+    targetUrl: 'https://cdn.test/media/1',
+    scope: TARGET_SCOPES.TARGET_ONLY,
+  });
+  assert.equal(allowed.ok, true);
+  assert.deepEqual(granted.calls.contains, [['https://cdn.test/*']]);
+
+  // Without the API the check is skipped rather than guessed, and the answer is
+  // still produced (documented: the result says nothing about access).
+  const noApi = createStubChrome({ withPermissionsApi: false });
+  const skipped = await createSource(noApi).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  assert.equal(skipped.ok, true);
 });
 
 test('an unscriptable page is an error, not a context with the worker user agent', async () => {

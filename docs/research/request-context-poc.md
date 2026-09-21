@@ -272,9 +272,11 @@ cookie: sid=…; theme=…; strict=…
 | `NOT_READY` | 没有唯一 Work Tab / 上下文 API 不可用 | **只判绑定与 API 可用性，不与 `USER_SCRIPTS_UNAVAILABLE` 联动**（读 cookie 不需要用户脚本授权，实测场景 4）|
 | `INVALID_TARGET_URL` | 非 http(s)、相对 URL、内嵌凭据 | |
 | `INVALID_SCOPE` | `scope` 既不是 `WORK_TAB_ORIGIN` 也不是 `TARGET_ONLY` | 拒绝而不是静默按默认处理 |
-| `INVALID_PARTITION` | `topLevelSite` 不是合法 URL，或 `hasCrossSiteAncestor` 不是 boolean | |
+| `INVALID_PARTITION` | `topLevelSite` 不是合法 URL，或 `hasCrossSiteAncestor` 不是 boolean | `topLevelSite: null` 也不豁免 boolean 校验 |
 | `TARGET_OUT_OF_SCOPE` | 默认 scope 下 targetUrl 与 Work Tab 不同源 | 此时**不会**触碰 cookie API |
-| `CONTEXT_FAILED` | `chrome.cookies` 调用失败、上下文不可序列化、**采样期间 Work Tab 发生了导航**（重试一次后仍不一致）| |
+| `CONTEXT_FAILED` | `chrome.cookies` 调用失败、页面读不到（站点访问受限）、**目标站点访问权限被撤下**、上下文不可序列化、**采样期间 Work Tab 发生了导航**（重试一次后仍不一致）| |
+
+**关于"最小上下文"的一句诚实说明**：`chrome.cookies` 返回的是**存储中匹配该 URL 的 cookie 全集**，不套用 SameSite 与第三方拦截，因此它可能比浏览器"此刻真的会发"的集合更大。Bridge 选择把这件事写进契约（`userAgentSource`、`duplicateCookieNames`、以及本句），而不是假装自己知道浏览器会怎么裁剪。
 
 **刻意不做的**：不返回 `Accept*`/`sec-ch-ua*`/`sec-fetch-*`（可由 Node 构造，Bridge 给"页面自陈"反而可能误导）；不返回 Proxy/出口信息（属 Service）；不缓存、不重试、不排队。
 

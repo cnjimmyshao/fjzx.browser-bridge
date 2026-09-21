@@ -200,7 +200,7 @@ Bridge 不会创建、关闭、恢复或重排任何 Tab，也不记住 Initial 
 | `storage` | 唯一持久配置 Service URL；Work Tab 绑定存于 `storage.session` |
 | `tabs` | 读取 `tab.url` 与 `changeInfo.url`。host 权限覆盖不了 `chrome://`，没有它时 Work Tab 导航到浏览器页面会被漏掉、继续被当成已绑定（实测） |
 | `userScripts` | 在 Work Tab 的 USER_SCRIPT world 执行 Service JavaScript |
-| `cookies` | 实验性请求上下文（issue #13）：读"浏览器自己会为某个 URL 发送什么 Cookie"。只用 `getAll({url})`，永不枚举整个 cookie 库；`cookies` 本身不新增权限警告文案 |
+| `cookies` | 实验性请求上下文（issue #13）：读**与该 URL 匹配的存储中的 cookie**（含 HttpOnly）。注意这**不是**"浏览器此刻会发送的集合"——SameSite 与第三方拦截不参与读取。只用 `getAll({url})`，永不枚举整个 cookie 库；`cookies` 本身不新增权限警告文案 |
 | `scripting` | 同一能力：读 Work Tab **页面自己**的 `navigator.userAgent` 与 `document.referrer`。实测页面级 UA 覆盖在页面里可见、在 service worker 里不可见，因此 worker 无法代答 |
 | `host_permissions: <all_urls>` | `execute()` 要求扩展对目标标签页有 host 权限（实测）；`chrome.cookies` 的读取范围也逐域受它限制 |
 
@@ -246,9 +246,9 @@ issue #13 的调研、POC，以及**按维护者要求做进真扩展的实验�
 - 真实实现：`src/lib/request-context.js`（纯逻辑）+ `src/lib/request-context-source.js`（可注入的 `chrome.cookies` / `tabs` / `scripting` 适配）+ `bridge-state.js` 里一条**不占 Job 槽**的短路径
 - 端到端验证：`npm run poc:context`（等价 `node tests/poc/request-context.mjs`）——在**真扩展**上跑 15 个场景，含反例；证据写在 `docs/research/evidence/request-context.json`
 
-`GET_REQUEST_CONTEXT` / `REQUEST_CONTEXT` 是**新增的一对实验性消息**（架构文档 §13），错误码自成一套（`NOT_READY` / `INVALID_TARGET_URL` / `INVALID_SCOPE` / `TARGET_OUT_OF_SCOPE` / `CONTEXT_FAILED`），删掉它不会影响 V1 的任何行为。是否冻结、是否保留 `cookies` + `scripting` 权限，都还留给评审决定。
+`GET_REQUEST_CONTEXT` / `REQUEST_CONTEXT` 是**新增的一对实验性消息**（架构文档 §14），错误码自成一套（`NOT_READY` / `INVALID_TARGET_URL` / `INVALID_SCOPE` / `INVALID_PARTITION` / `TARGET_OUT_OF_SCOPE` / `CONTEXT_FAILED`），删掉它不会影响 V1 的任何行为。是否冻结、是否保留 `cookies` + `scripting` 权限，都还留给评审决定。
 
-实测事实（Chrome for Testing 153）：`chrome.cookies.getAll({url})` 能拿到 **HttpOnly** cookie（页面 JS 看不到）；`SameSite=Strict` 不影响读取；**分区（CHIPS）cookie 必须给出完整分区键**——只给顶层站点会同时命中 `hasCrossSiteAncestor` 的两种取值，实测同一 URL 两位互不包含（默认按 schemeful site 推导出正确的那一位）；页面级 UA 覆盖后上下文跟随页面；全程不落盘、日志里没有 cookie 值。
+实测事实（Chrome for Testing 153）：`chrome.cookies.getAll({url})` 能拿到 **HttpOnly** cookie（页面 JS 看不到）；**它给的是"存储中匹配该 URL 的 cookie 全集"，不是"浏览器此刻会发送的集合"**——SameSite 与第三方拦截都不参与读取；**分区（CHIPS）cookie 必须给出完整分区键**——只给顶层站点会同时命中 `hasCrossSiteAncestor` 的两种取值，实测同一 URL 两位互不包含（默认按 schemeful site 推导出正确的那一位）；页面级 UA 覆盖后上下文跟随页面；全程不落盘、日志里没有 cookie 值。
 
 ## 开发
 
