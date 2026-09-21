@@ -97,7 +97,7 @@ MV3 service worker **不是常驻进程**。实测（Chrome for Testing 153.0.80
 
 ## 开发
 
-需要 Node >= 20.11（测试使用内置 `node:test`，无第三方依赖）。
+需要 Node >= 22（测试使用内置 `node:test` 与全局 `WebSocket`，无第三方依赖）。
 
 ```powershell
 npm test        # 等价于 node --test

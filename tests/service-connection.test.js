@@ -356,6 +356,28 @@ test('a state handler that reconnects on DISCONNECTED must not orphan a socket',
   assert.equal(h.timers.pendingCount(), 0);
 });
 
+test('a state handler that switches endpoint on CONNECTING keeps the close notification', () => {
+  const h = createHarness({ closeGraceMs: 1000 });
+  let switched = false;
+  h.connection.setStateChangeHandler((state) => {
+    if (state === CONNECTION_STATES.CONNECTING && !switched) {
+      switched = true;
+      h.connection.setUrl('ws://second');
+    }
+  });
+
+  h.connection.setUrl('ws://first');
+  assert.equal(h.sockets().length, 1);
+
+  // The peer acknowledges the close promptly. The retirement must still be
+  // listening, otherwise the switch waits for the grace timer for no reason.
+  h.sockets()[0].fireClose();
+
+  assert.equal(h.sockets().length, 2, '关闭确认到达后应立即拨号');
+  assert.equal(h.sockets()[1].url, 'ws://second');
+  assert.equal(h.timers.pendingCount(), 0, '宽限定时器应已被清理');
+});
+
 test('raw frames reach the handler, including text that is not JSON', () => {
   const h = createHarness();
   h.connection.setUrl('ws://service');

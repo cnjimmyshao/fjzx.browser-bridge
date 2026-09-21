@@ -202,8 +202,11 @@ export function createServiceConnection(options = {}) {
     const ws = createSocket();
     if (!ws) return;
     socket = ws;
-    setState(CONNECTION_STATES.CONNECTING);
 
+    // Every handler is wired before the state is published. A CONNECTING handler
+    // may legitimately switch endpoint, which retires this socket immediately;
+    // assigning handlers afterwards would overwrite the retirement's own close
+    // notification and silently lose the peer's acknowledgment.
     ws.onopen = () => {
       if (socket !== ws) return;
       attempt = 0;
@@ -237,6 +240,8 @@ export function createServiceConnection(options = {}) {
       scheduleReconnect();
       setState(CONNECTION_STATES.DISCONNECTED);
     };
+
+    setState(CONNECTION_STATES.CONNECTING);
   }
 
   return {
