@@ -246,6 +246,28 @@ export async function httpPages(port) {
 }
 
 /**
+ * Delete a generated profile, patiently.
+ *
+ * Windows refuses to remove files that a process still holds open, and Chrome's
+ * renderer/GPU children outlive the browser process briefly. Retrying beats both
+ * failing a green run over cleanup and leaking a profile per run.
+ *
+ * @param {string} profile @param {number} [timeoutMs]
+ */
+async function removeProfile(profile, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      rmSync(profile, { recursive: true, force: true });
+      return true;
+    } catch {
+      if (Date.now() >= deadline) return false;
+      await sleep(200);
+    }
+  }
+}
+
+/**
  * @param {{exe: string, extensionPath: string, port?: number, profile?: string, headless?: boolean}} options
  */
 export async function launchBrowser(options) {
@@ -268,7 +290,13 @@ export async function launchBrowser(options) {
     );
   }
 
-  rmSync(profile, { recursive: true, force: true });
+  // Clear anything left by a crashed run. Failing loudly beats handing Chrome a
+  // profile another process is still using.
+  try {
+    rmSync(profile, { recursive: true, force: true });
+  } catch (error) {
+    throw new Error(`无法清理 profile ${profile}（上次的浏览器可能还没退出）：${error.message}`);
+  }
   mkdirSync(profile, { recursive: true });
 
   const args = [
@@ -309,7 +337,7 @@ export async function launchBrowser(options) {
     // is not really Chrome — never opens the port. Waiting out the full deadline
     // would hide the exit code behind a generic timeout.
     if (child.exitCode !== null) {
-      rmSync(profile, { recursive: true, force: true });
+      await removeProfile(profile);
       throw new Error(`浏览器进程已退出（退出码 ${child.exitCode}），调试端口 ${port} 没有打开。`);
     }
 
@@ -325,11 +353,12 @@ export async function launchBrowser(options) {
       // Chrome hands off to an instance already using this profile and exits, so a
       // dead child means this endpoint is somebody else's.
       if (child.exitCode !== null) {
+        await removeProfile(profile);
         throw new Error(
           `浏览器进程已退出（退出码 ${child.exitCode}），端口 ${port} 上的端点不属于本次 POC。`,
         );
       }
-      return { port, profile, pid: child.pid, browser: version.Browser };
+      return { port, profile, pid: child.pid, browser: version.Browser, stop };
     }
 
     await sleep(250);
@@ -337,12 +366,37 @@ export async function launchBrowser(options) {
 
   // Nothing answered in time. The child is detached and was never returned to the
   // caller, so the caller's cleanup cannot reach it: it has to die here.
-  try {
-    process.kill(child.pid);
-  } catch {
-    // already gone
-  }
+  await killChild();
+  await removeProfile(profile);
   throw new Error(`浏览器调试端口 ${port} 在 30s 内没有就绪`);
+
+  /**
+   * Signal the browser and wait for it to actually be gone.
+   *
+   * Signalling alone is not enough on Windows: the profile stays locked until every
+   * process holding it has exited, so an immediate rerun could not clear it.
+   */
+  async function killChild(timeoutMs = 10000) {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const exited = new Promise((resolve) => child.once('exit', resolve));
+    try {
+      process.kill(child.pid);
+    } catch {
+      // already gone
+    }
+    await Promise.race([exited, sleep(timeoutMs)]);
+  }
+
+  /**
+   * Kill the browser and drop its generated profile.
+   *
+   * Without this the POC leaves a full Chrome profile behind on every successful
+   * run — one per `--port`, tens of megabytes each.
+   */
+  async function stop() {
+    await killChild();
+    return removeProfile(profile);
+  }
 }
 
 /**
@@ -363,8 +417,7 @@ async function isEndpointAlive(port) {
   }
 }
 
-/** @param {number} port @param {string} name @param {number} [timeoutMs] */
-export async function findExtensionId(port, name, timeoutMs = 15000) {
+/** @param {number} port @param {string} name @param {number} [timeoutMs] */export async function findExtensionId(port, name, timeoutMs = 15000) {
   let targetId;
   try {
     targetId = await openPage(port, 'chrome://extensions');

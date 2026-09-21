@@ -393,13 +393,10 @@ try {
 
   if (service) await service.stop();
   if (pages) await pages.close();
-  if (browser?.pid) {
-    try {
-      process.kill(browser.pid);
-    } catch {
-      // already gone
-    }
-  }
+  // `stop()` waits for Chrome to actually exit and then removes the profile it was
+  // given: signalling the PID alone leaves a full profile behind on every run, and
+  // an immediate rerun would then race a profile that is still locked.
+  if (browser) await browser.stop();
 
   process.exitCode = failed.length === 0 ? 0 : 1;
 }
