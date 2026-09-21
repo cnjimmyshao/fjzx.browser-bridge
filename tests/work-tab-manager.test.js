@@ -538,47 +538,7 @@ test('navigating away then closing before the query resolves is not a closure', 
   );
 });
 
-test('ready() waits for an evaluation that was actually applied', async () => {
-  const fake = createFakeTabs([web(1)], { manual: true });
-  const manager = createWorkTabManager({ tabs: fake.api });
-
-  // The startup refresh is superseded before it can apply anything.
-  const startup = manager.refresh('worker-start');
-  await settle();
-  const newer = manager.refresh('tab-created');
-  await settle();
-  assert.equal(fake.pendingQueryCount(), 2);
-
-  let ready = false;
-  void manager.ready().then(() => {
-    ready = true;
-  });
-  await settle();
-  assert.equal(ready, false);
-
-  fake.resolveQuery(0, [web(1)]); // superseded: applies nothing
-  await startup;
-  await settle();
-  assert.equal(ready, false, '被取代的刷新不得释放 ready');
-
-  fake.resolveQuery(0, [web(1)]); // the newer one applies
-  await newer;
-  await settle();
-
-  assert.equal(ready, true);
-  assert.equal(manager.tabId, 1);
-});
-
-test('ready() also settles when the first query fails, rather than blocking forever', async () => {
-  const fake = createFakeTabs([web(1)]);
-  fake.failQueries();
-  const manager = createWorkTabManager({ tabs: fake.api });
-
-  await manager.refresh('worker-start');
-  await assert.doesNotReject(() => manager.ready());
-});
-
-test('a superseded query failing does not release readiness', async () => {
+test('settled() waits until no tab evaluation is in flight', async () => {
   const fake = createFakeTabs([web(1)], { manual: true });
   const manager = createWorkTabManager({ tabs: fake.api });
 
@@ -586,21 +546,45 @@ test('a superseded query failing does not release readiness', async () => {
   await settle();
   const newer = manager.refresh('tab-created'); // supersedes the startup query
   await settle();
+  assert.equal(fake.pendingQueryCount(), 2);
 
-  let ready = false;
-  void manager.ready().then(() => {
-    ready = true;
+  let done = false;
+  void manager.settled().then(() => {
+    done = true;
   });
+  await sleep(1);
+  assert.equal(done, false);
 
-  fake.rejectQuery(0); // the superseded startup query fails
+  fake.resolveQuery(0, [web(1)]); // superseded: applies nothing
   await startup;
   await settle();
-  assert.equal(ready, false, '被取代的查询失败不得释放 ready：更新的评估还在路上');
+  assert.equal(done, false, '还有一次评估在途，不得提前放行');
 
-  fake.resolveQuery(0, [web(1)]);
+  fake.resolveQuery(0, [web(1)]); // the newest one applies
   await newer;
   await settle();
-  assert.equal(ready, true);
+
+  assert.equal(done, true);
+  assert.equal(manager.tabId, 1);
+});
+
+test('settled() resolves immediately when nothing is in flight', async () => {
+  const fake = createFakeTabs([web(1)]);
+  const manager = createWorkTabManager({ tabs: fake.api });
+
+  await manager.refresh('worker-start');
+
+  await assert.doesNotReject(() => manager.settled());
+});
+
+test('settled() resolves after a failing query rather than blocking forever', async () => {
+  const fake = createFakeTabs([web(1)]);
+  fake.failQueries();
+  const manager = createWorkTabManager({ tabs: fake.api });
+
+  await manager.refresh('worker-start');
+
+  await assert.doesNotReject(() => manager.settled());
 });
 
 test('a failing binding read or write never breaks the manager', async () => {

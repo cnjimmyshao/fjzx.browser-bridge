@@ -68,22 +68,22 @@ const bridge = createBridgeState({
   logger: console,
 });
 
-// Evaluated before the tab listeners can fire, so the initial binding is in
-// place as soon as the worker is up. `ready()` follows through to an evaluation
-// that was actually applied: a startup refresh superseded by a tab event never
-// applies its own snapshot.
-const workTabReady = workTab.refresh('worker-start').then(() => workTab.ready());
+// Started before the listeners below so the initial binding is in place as soon
+// as the worker is up. `settled()` is what inbound frames wait on.
+void workTab.refresh('worker-start');
 
 connection.setMessageHandler((data) => {
-  // The socket can open before the first Work Tab evaluation finishes, and a
-  // frame answered in that window would report NO_WORK_TAB for a profile that
-  // does have a Work Tab â€?with no later message to correct it.
+  // Wait for any tab evaluation still in flight before answering. Without this a
+  // frame can be handled while a stale binding is still being reported: before
+  // the first evaluation, or during the query that a newly created second tab
+  // just triggered, where a Job would run against an already-ambiguous profile.
   //
   // The endpoint is captured now, not after the wait: the operator may repoint
   // the Service URL while a frame is queued, and that frame belongs to the
   // Service that sent it, not to whoever is connected afterwards.
   const deliveredOn = connection.url;
-  void workTabReady
+  void workTab
+    .settled()
     .then(() => bridge.handleMessage(data, { deliveredOn }))
     .catch((error) => {
       // `handleMessage` already absorbs everything; this only guarantees a

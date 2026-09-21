@@ -196,9 +196,14 @@ function checkJsonCompatible(value, path) {
   path.add(value);
   try {
     if (Array.isArray(value)) {
-      // `every` skips holes, yet they leave as null, and a stray property is
-      // dropped entirely.
-      if (value.length !== Object.keys(value).length) return false;
+      // JSON keeps the canonical indices and nothing else, so a hole, a stray
+      // property, a symbol key — or a `toJSON` that JSON.stringify would call
+      // instead of reading the array — all change the value on the way out.
+      if (Object.keys(value).length !== value.length) return false;
+      for (const key of Reflect.ownKeys(value)) {
+        if (key === 'length') continue;
+        if (typeof key !== 'string' || !/^(0|[1-9]\d*)$/.test(key)) return false;
+      }
       return value.every((item) => checkJsonCompatible(item, path));
     }
 
@@ -209,12 +214,17 @@ function checkJsonCompatible(value, path) {
       return false;
     }
 
-    // JSON keeps only own enumerable string-keyed properties, so anything else
-    // would be dropped without the Service being able to tell.
+    // JSON keeps only own enumerable string-keyed data properties, so anything
+    // else would be dropped or re-evaluated without the Service being able to
+    // tell. An accessor is rejected as well because reading it twice can yield
+    // two different values: the one that was validated need not be the one that
+    // gets sent.
     for (const key of Reflect.ownKeys(value)) {
       if (typeof key !== 'string') return false;
-      if (!Object.prototype.propertyIsEnumerable.call(value, key)) return false;
-      if (!checkJsonCompatible(value[key], path)) return false;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor.enumerable) return false;
+      if (descriptor.get !== undefined || descriptor.set !== undefined) return false;
+      if (!checkJsonCompatible(descriptor.value, path)) return false;
     }
     return true;
   } finally {

@@ -248,18 +248,71 @@ test('refuses object properties JSON would drop', () => {
   assert.equal(isJsonCompatible({ a: 1, b: 'two' }), true);
 });
 
-test('is total: a property that throws while being read is a rejection, not a crash', () => {
-  const explosive = {
-    get boom() {
-      throw new Error('getter exploded');
+test('refuses array own properties JSON would ignore or call', () => {
+  const withSymbol = [1];
+  withSymbol[Symbol('x')] = 2;
+  assert.equal(isJsonCompatible(withSymbol), false, '数组上的 symbol key 会被忽略');
+
+  const hidden = [1];
+  Object.defineProperty(hidden, 'extra', { value: 2, enumerable: false });
+  assert.equal(isJsonCompatible(hidden), false, '数组上的不可枚举属性会被忽略');
+
+  // JSON.stringify calls toJSON *instead of* reading the array, so `ok: true`
+  // could carry something the script never returned.
+  const withToJson = [1];
+  Object.defineProperty(withToJson, 'toJSON', { value: () => ({ replaced: true }) });
+  assert.equal(isJsonCompatible(withToJson), false);
+
+  const withNamedProperty = [1];
+  withNamedProperty.named = 'x';
+  assert.equal(isJsonCompatible(withNamedProperty), false);
+
+  assert.equal(isJsonCompatible([1, 2]), true);
+  assert.equal(isJsonCompatible([]), true);
+});
+
+test('refuses accessor properties, which can differ between reads', () => {
+  // Validation reads the property once and serialization reads it again; an
+  // accessor makes those two reads two different values.
+  let reads = 0;
+  const shifty = {
+    get value() {
+      reads += 1;
+      return reads === 1 ? 'first' : 'second';
     },
   };
+  assert.equal(isJsonCompatible(shifty), false);
+
+  const stableGetter = {
+    get value() {
+      return 1;
+    },
+  };
+  assert.equal(isJsonCompatible(stableGetter), false, '访问器本身就不算 plain data');
+
+  const setterOnly = {};
+  Object.defineProperty(setterOnly, 'value', { set() {}, enumerable: true });
+  assert.equal(isJsonCompatible(setterOnly), false);
+
+  assert.equal(isJsonCompatible({ value: 1 }), true);
+});
+
+test('is total: a value that throws while being inspected is a rejection, not a crash', () => {
+  const explosive = new Proxy(
+    { a: 1 },
+    {
+      ownKeys() {
+        throw new Error('ownKeys exploded');
+      },
+    },
+  );
   assert.doesNotThrow(() => isJsonCompatible(explosive));
   assert.equal(isJsonCompatible(explosive), false);
 
-  const nested = { ok: 1, deeper: { get alsoBoom() { throw new Error('nested'); } } };
-  assert.equal(isJsonCompatible(nested), false);
-
-  const explosiveArray = [{ get boom() { throw new Error('in array'); } }];
-  assert.equal(isJsonCompatible(explosiveArray), false);
+  const nested = new Proxy({}, {
+    getPrototypeOf() {
+      throw new Error('prototype exploded');
+    },
+  });
+  assert.equal(isJsonCompatible({ deeper: nested }), false);
 });

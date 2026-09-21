@@ -250,21 +250,23 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
   /** Writes are chained so an older snapshot can never land after a newer one. */
   let persistChain = Promise.resolve();
   /**
-   * Resolves once an evaluation has actually been applied to the tracker, so a
-   * caller can avoid answering out of the not-yet-evaluated defaults. A refresh
-   * that a newer one supersedes never applies its own snapshot, which is why this
-   * cannot simply be the startup refresh's promise.
+   * Counts tab evaluations currently in flight, so a caller can wait until the
+   * state it is about to read is current. A one-shot "has it ever been evaluated"
+   * flag is not enough: every later tab event starts its own asynchronous query
+   * during which the previous binding is still being reported.
    */
-  let markReady;
-  const readyPromise = new Promise((resolve) => {
-    markReady = resolve;
-  });
-  let readySettled = false;
-  const settleReady = () => {
-    if (readySettled) return;
-    readySettled = true;
-    markReady();
-  };
+  let inFlight = 0;
+  const idleWaiters = [];
+
+  function beginRefresh() {
+    inFlight += 1;
+  }
+
+  function endRefresh() {
+    inFlight -= 1;
+    if (inFlight > 0) return;
+    for (const resolve of idleWaiters.splice(0)) resolve();
+  }
 
   /**
    * Read the memory a previous worker lifetime left behind. Manifest V3 may
@@ -316,36 +318,47 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
 
   /** @param {string} trigger */
   async function refresh(trigger) {
-    await seeded;
-    const revision = (queryRevision += 1);
-
-    let found;
+    // Counted before the first await, so a caller that starts waiting right after
+    // triggering a refresh cannot slip through the gap.
+    beginRefresh();
     try {
-      found = await tabs.query({});
-    } catch (error) {
-      logger.warn?.('[bridge] failed to list tabs', error);
-      // The current state is published and persisted either way: it may already
-      // have been changed synchronously by the event that triggered this refresh.
+      await seeded;
+      const revision = (queryRevision += 1);
+
+      let found;
+      try {
+        found = await tabs.query({});
+      } catch (error) {
+        logger.warn?.('[bridge] failed to list tabs', error);
+        // The current state is published and persisted either way: it may already
+        // have been changed synchronously by the event that triggered this refresh.
+        publish(trigger);
+        persist();
+        return;
+      }
+
+      if (revision !== queryRevision) {
+        logger.info?.(`[bridge] ${trigger}: superseded by a newer tab query; ignoring`);
+        return;
+      }
+
+      tracker.applyTabs(found);
       publish(trigger);
       persist();
-      // Readiness is settled only by the newest attempt. A superseded query's
-      // failure says nothing about the newer evaluation still in flight, and
-      // releasing early would let a frame answer from the unevaluated defaults.
-      // Settling on the newest failure keeps a caller from blocking forever on a
-      // query that cannot succeed.
-      if (revision === queryRevision) settleReady();
-      return;
+    } finally {
+      endRefresh();
     }
+  }
 
-    if (revision !== queryRevision) {
-      logger.info?.(`[bridge] ${trigger}: superseded by a newer tab query; ignoring`);
-      return;
-    }
-
-    tracker.applyTabs(found);
-    publish(trigger);
-    persist();
-    settleReady();
+  /**
+   * Resolves once no tab evaluation is in flight, so a caller can be sure the
+   * state it reads next is not a snapshot that is already outdated. Refreshes
+   * that a newer one supersedes still count until the newest one finishes, which
+   * is exactly what makes this honest.
+   */
+  function settled() {
+    if (inFlight === 0) return Promise.resolve();
+    return new Promise((resolve) => idleWaiters.push(resolve));
   }
 
   /** Run `work` once the restored memory is in place, in event order. */
@@ -400,11 +413,10 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
     },
     refresh,
     /**
-     * Resolves once a tab snapshot has actually been applied (or a query attempt
-     * has failed), so callers never answer out of the not-yet-evaluated defaults.
+     * Resolves once no tab snapshot is being evaluated, so callers never answer
+     * from a state that is already known to be stale (or from the defaults before
+     * the first evaluation).
      */
-    ready() {
-      return readyPromise;
-    },
+    settled,
   };
 }
