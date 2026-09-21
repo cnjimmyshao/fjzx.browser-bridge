@@ -45,7 +45,7 @@ Bridge 当前状态：
 
 1. ✅ Extension Settings 保存 Service URL；
 2. ✅ WebSocket 连接 Service；
-3. 自动识别唯一 Work Tab；
+3. ✅ 自动识别唯一 Work Tab；
 4. 接收 EXECUTE；
 5. 使用 `chrome.userScripts.execute()` 在 USER_SCRIPT world 执行 JavaScript；
 6. 主动 Push RESULT；
@@ -56,7 +56,7 @@ Bridge 当前状态：
 ```text
 src/                      Extension 根目录，Chrome 直接加载此目录
   manifest.json
-  background/             MV3 service worker：Service 连接生命周期
+  background/             MV3 service worker：Service 连接生命周期、Work Tab 绑定
   lib/                    纯逻辑，不依赖 chrome.*，可在 Node 下直接测试
   options/                Options 设置页
 tests/                    node:test 自动化测试
@@ -65,6 +65,25 @@ docs/architecture-v1.md   V1 架构与协议
 ```
 
 `src/` 就是 Extension 根目录，**没有打包步骤**：Chrome 直接加载 `src/`，因此 `tests/`、`docs/`、`package.json` 不会进入 Extension。
+
+## Work Tab
+
+一个专用 Browser/Profile 正常只保留一个普通业务 Tab，Bridge 把**唯一候选**绑定为 Work Tab。判定只看"这是不是一个普通网页"，**从不读取域名、路径或平台**：
+
+| 候选数 | 结果 |
+| --- | --- |
+| 恰好 1 个 | 绑定该 tabId |
+| 0 个 | `NO_WORK_TAB` |
+| 多于 1 个 | `MULTIPLE_TABS`（**不任选一个**） |
+| 已绑定 Tab 被关闭 | `WORK_TAB_CLOSED` |
+
+"普通网页"只按 scheme 判定：`http:` / `https:` 之外一律不是候选，因此 `chrome://`、`chrome-extension://`（含本扩展自己的 Options 页）、`devtools://`、`about:`、`file:` 都不会被误判。
+
+绑定结果是**候选列表的纯函数**，没有滞回：一旦出现第二个普通 Tab，Bridge 就无法知道 Service 在驱动哪一个，于是如实报告 `MULTIPLE_TABS`，而不是沿用可能已经过期的绑定。同一 Tab 内导航会让该 Tab 仍是唯一候选，因此身份自然保持不变。
+
+Bridge 不会创建、关闭、恢复或重排任何 Tab，也不记住 Initial URL——这些都归 Service。受影响的只有 Bridge 的技术状态，页面内容是否"正常"仍由 Service 判断。
+
+> `manifest.json` 因 V1.3 新增了 `tabs` 权限：没有它时 `tab.url` 会被脱敏（已实测为 `undefined`），无法区分普通网页与浏览器页面。它不授予页面内容访问权，也不是 host 权限。
 
 ## Service 连接
 
