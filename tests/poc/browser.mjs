@@ -258,6 +258,21 @@ export async function launchBrowser(options) {
   const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
   child.unref();
 
+  // `existsSync` is happy with a directory or a non-executable file, and `spawn`
+  // reports those through the `error` event rather than by throwing. With no
+  // listener that is an uncaught exception, which would kill the runner before its
+  // `finally` could print a summary or clean up the profile.
+  try {
+    await new Promise((resolve, reject) => {
+      child.once('error', (error) => reject(new Error(`无法启动浏览器 ${exe}：${error.message}`)));
+      child.once('spawn', resolve);
+    });
+  } catch (error) {
+    // Nothing was started, so the profile this call created is the only thing to undo.
+    rmSync(profile, { recursive: true, force: true });
+    throw error;
+  }
+
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     let version = null;
@@ -310,8 +325,8 @@ async function isEndpointAlive(port) {
   }
 }
 
-/** @param {number} port @param {string} name */
-export async function findExtensionId(port, name) {
+/** @param {number} port @param {string} name @param {number} [timeoutMs] */
+export async function findExtensionId(port, name, timeoutMs = 15000) {
   let targetId;
   try {
     targetId = await openPage(port, 'chrome://extensions');
@@ -323,25 +338,42 @@ export async function findExtensionId(port, name) {
         '扩展从未被加载；请改用 Chrome for Testing。',
     );
   }
-  await sleep(1200);
-  const found = await evaluate(
-    port,
-    targetId,
-    `(() => {
-      const manager = document.querySelector('extensions-manager');
-      const list = manager?.shadowRoot?.querySelector('extensions-item-list');
-      const items = [...(list?.shadowRoot?.querySelectorAll('extensions-item') ?? [])];
-      return JSON.stringify(items.map((item) => ({
-        id: item.id,
-        name: item.shadowRoot.querySelector('#name')?.textContent?.trim() ?? '',
-      })));
-    })()`,
-  );
-  await closePage(port, targetId);
 
-  const match = JSON.parse(found).find((item) => item.name === name);
-  if (!match) throw new Error(`chrome://extensions 中找不到名为 “${name}” 的扩展`);
-  return match.id;
+  try {
+    // Poll instead of sleeping a fixed amount: the target exists as soon as the page
+    // is created, but the shadow-DOM list fills in later, and how much later depends
+    // on the machine. A fixed delay turns a slow start into "extension not loaded".
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const found = await evaluate(
+        port,
+        targetId,
+        `(() => {
+          const manager = document.querySelector('extensions-manager');
+          const list = manager?.shadowRoot?.querySelector('extensions-item-list');
+          const items = [...(list?.shadowRoot?.querySelectorAll('extensions-item') ?? [])];
+          return JSON.stringify(items.map((item) => ({
+            id: item.id,
+            name: item.shadowRoot.querySelector('#name')?.textContent?.trim() ?? '',
+          })));
+        })()`,
+      );
+
+      const items = JSON.parse(found);
+      const match = items.find((item) => item.name === name);
+      if (match) return match.id;
+      if (Date.now() >= deadline) {
+        const listed = items.map((item) => item.name).filter(Boolean);
+        throw new Error(
+          `chrome://extensions 中找不到名为 “${name}” 的扩展` +
+            `（已列出：${listed.length > 0 ? listed.join('、') : '空'}）`,
+        );
+      }
+      await sleep(200);
+    }
+  } finally {
+    await closePage(port, targetId);
+  }
 }
 
 /**
@@ -350,30 +382,40 @@ export async function findExtensionId(port, name) {
  * Chrome 138+ gates `chrome.userScripts` this way, and an unpacked extension
  * starts with it off, so this is a required step rather than a convenience.
  *
- * @param {number} port @param {string} extensionId
+ * @param {number} port @param {string} extensionId @param {number} [timeoutMs]
  */
-export async function allowUserScripts(port, extensionId) {
+export async function allowUserScripts(port, extensionId, timeoutMs = 15000) {
   const targetId = await openPage(port, `chrome://extensions/?id=${extensionId}`);
-  await sleep(1500);
-  const state = await evaluate(
-    port,
-    targetId,
-    `(() => {
-      const manager = document.querySelector('extensions-manager');
-      const view = manager?.shadowRoot?.querySelector('extensions-detail-view');
-      const row = view?.shadowRoot?.querySelector('#allow-user-scripts');
-      const toggle = row?.shadowRoot?.querySelector('#crToggle');
-      if (!toggle) return 'NO_TOGGLE';
-      if (!toggle.checked) toggle.click();
-      return JSON.stringify({ checked: toggle.checked });
-    })()`,
-  );
-  await closePage(port, targetId);
 
-  if (state === 'NO_TOGGLE') {
-    throw new Error('扩展详情页找不到 Allow User Scripts 开关（Chrome 版本可能低于 138）');
+  try {
+    // Same reasoning as findExtensionId: the detail view is built after the target
+    // appears, so waiting a fixed 1.5s can read an empty shadow DOM and conclude the
+    // toggle does not exist.
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const state = await evaluate(
+        port,
+        targetId,
+        `(() => {
+          const manager = document.querySelector('extensions-manager');
+          const view = manager?.shadowRoot?.querySelector('extensions-detail-view');
+          const row = view?.shadowRoot?.querySelector('#allow-user-scripts');
+          const toggle = row?.shadowRoot?.querySelector('#crToggle');
+          if (!toggle) return 'NO_TOGGLE';
+          if (!toggle.checked) toggle.click();
+          return JSON.stringify({ checked: toggle.checked });
+        })()`,
+      );
+
+      if (state !== 'NO_TOGGLE') return JSON.parse(state).checked;
+      if (Date.now() >= deadline) {
+        throw new Error('扩展详情页找不到 Allow User Scripts 开关（Chrome 版本可能低于 138）');
+      }
+      await sleep(200);
+    }
+  } finally {
+    await closePage(port, targetId);
   }
-  return JSON.parse(state).checked;
 }
 
 export { DEBUG_PORT, sleep };

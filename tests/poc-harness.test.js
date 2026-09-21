@@ -163,6 +163,26 @@ test('端口会接受连接但不回应时，同样算被占用（探测必须�
   }
 });
 
+test('浏览器路径不可执行时返回失败，而不是让 error 事件掀翻整个进程', async () => {
+  // `existsSync` accepts a directory, and `spawn` reports the failure through the
+  // child's `error` event. Without a listener that is an uncaught exception, which
+  // kills the runner before its finally block can print a summary or clean up.
+  const freePort = await new Promise((resolve) => {
+    const probe = createTcpServer();
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+  const profile = join(tmpdir(), `bridge-poc-unspawnable-${freePort}`);
+
+  await assert.rejects(
+    launchBrowser({ exe: tmpdir(), extensionPath: 'unused', port: freePort, profile }),
+    /无法启动浏览器/,
+  );
+  assert.equal(existsSync(profile), false, '启动失败时不应留下 profile');
+});
+
 test('openPage 返回新建的 target，而不是已存在的同前缀页面', async () => {
   // Reproduces the real hazard: `chrome://extensions` is still closing when
   // `allowUserScripts()` opens `chrome://extensions/?id=…`. Matching by URL prefix
