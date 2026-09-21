@@ -54,6 +54,15 @@ export function validateServiceUrl(raw) {
     return { ok: false, error: 'Service URL 缺少主机名。' };
   }
 
+  if (parsed.hash !== '') {
+    // `new URL()` accepts fragments but the WebSocket constructor throws on
+    // them, so persisting this would store an address that can never connect.
+    return {
+      ok: false,
+      error: 'Service URL 不得包含片段标识（# 之后的部分），WebSocket 不接受该地址。',
+    };
+  }
+
   // Store the trimmed operator input rather than a re-serialized URL: Bridge
   // does not reinterpret what the Service configured.
   return { ok: true, value: trimmed };

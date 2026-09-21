@@ -45,6 +45,13 @@ test('identifies the extension without platform semantics', () => {
   assert.notEqual(manifest.description.trim(), '');
 });
 
+test('description stays within the documented 132-character limit', () => {
+  // Counted by code point rather than UTF-16 unit so the assertion holds if the
+  // description ever picks up non-BMP characters.
+  const length = [...manifest.description].length;
+  assert.ok(length <= 132, `description 为 ${length} 字符，超过 Chrome 文档的 132 上限`);
+});
+
 test('declares an options page that exists inside the extension root', () => {
   assert.equal(typeof manifest.options_ui?.page, 'string');
   const page = manifest.options_ui.page;

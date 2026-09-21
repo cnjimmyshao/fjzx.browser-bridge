@@ -23,11 +23,12 @@
           spellcheck="false"
           placeholder="ws://127.0.0.1:8080"
           aria-describedby="service-url-status"
+          disabled
         />
         <p id="service-url-status" class="status" role="status" aria-live="polite"></p>
         <div class="actions">
-          <button type="submit">保存</button>
-          <button type="button" id="clear-service-url" class="secondary">清除</button>
+          <button type="submit" id="save-service-url" disabled>保存</button>
+          <button type="button" id="clear-service-url" class="secondary" disabled>清除</button>
         </div>
       </form>
 

@@ -83,8 +83,15 @@ button {
   cursor: pointer;
 }
 
-button:hover {
+button:hover:not(:disabled) {
   border-color: color-mix(in srgb, CanvasText 45%, transparent);
+}
+
+/* The form stays disabled until the stored value has been applied. */
+input[type="text"]:disabled,
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 button:focus-visible {

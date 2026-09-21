@@ -6,10 +6,25 @@ const form = document.getElementById('settings-form');
 const input = document.getElementById('service-url');
 const status = document.getElementById('service-url-status');
 const configured = document.getElementById('configured-state');
+const saveButton = document.getElementById('save-service-url');
 const clearButton = document.getElementById('clear-service-url');
 
 const NOT_CONFIGURED_TEXT = '未配置';
 const READ_FAILED_TEXT = '读取失败';
+
+/**
+ * The form starts disabled in the markup and is enabled only once the stored
+ * value has been applied. Otherwise a slow `chrome.storage.local.get()` would
+ * clobber whatever the operator had already typed, and a quick save could be
+ * overwritten by the in-flight read.
+ *
+ * @param {boolean} enabled
+ */
+function setFormEnabled(enabled) {
+  input.disabled = !enabled;
+  saveButton.disabled = !enabled;
+  clearButton.disabled = !enabled;
+}
 
 /** @param {unknown} error */
 function describeError(error) {
@@ -45,6 +60,8 @@ async function load() {
   } catch (error) {
     configured.textContent = READ_FAILED_TEXT;
     setStatus(`读取配置失败：${describeError(error)}`, 'error');
+  } finally {
+    setFormEnabled(true);
   }
 }
 

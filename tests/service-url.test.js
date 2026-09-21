@@ -51,6 +51,21 @@ test('rejects input that is missing a ws/wss scheme', () => {
   }
 });
 
+test('rejects fragment identifiers that the WebSocket constructor refuses', () => {
+  // `new URL()` accepts these, but `new WebSocket(url)` throws on a non-empty
+  // fragment, so accepting them would persist an unreachable Service URL.
+  for (const raw of ['wss://service.example/bridge#fragment', 'ws://127.0.0.1:8080#x']) {
+    const result = validateServiceUrl(raw);
+    assert.equal(result.ok, false, `${raw} 应被拒绝`);
+    assert.match(result.error, /片段标识/);
+  }
+});
+
+test('still accepts a query string, which WebSocket does allow', () => {
+  const result = validateServiceUrl('ws://127.0.0.1:8080/path?token=1');
+  assert.deepEqual(result, { ok: true, value: 'ws://127.0.0.1:8080/path?token=1' });
+});
+
 test('rejects non-string input', () => {
   for (const raw of [42, true, {}, [], () => {}]) {
     const result = validateServiceUrl(raw);
