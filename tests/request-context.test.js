@@ -312,8 +312,10 @@ function createStubChrome({
   tabMissing = false,
   denyTargetAccess = false,
   withPermissionsApi = true,
+  cookieStores = [{ id: '0', tabIds: [1] }],
+  failCookieStores = false,
 } = {}) {
-  const calls = { getAll: [], executeScript: [], get: [], contains: [] };
+  const calls = { getAll: [], executeScript: [], get: [], contains: [], getAllCookieStores: [] };
   let tabReads = 0;
   let factReads = 0;
   const stub = {
@@ -323,6 +325,11 @@ function createStubChrome({
         calls.getAll.push(details);
         if (failCookies) throw new Error('cookies boom');
         return details.partitionKey ? partitioned : cookies;
+      },
+      async getAllCookieStores() {
+        calls.getAllCookieStores.push(true);
+        if (failCookieStores) throw new Error('stores boom');
+        return cookieStores;
       },
     },
     tabs: {
@@ -545,6 +552,42 @@ test('a navigation during the sample is retried, and never answered with a mixtu
   assert.match(mixed.message, /导航/);
 });
 
+test('reads the cookie store the Work Tab actually lives in', async () => {
+  // Incognito is a separate store, and `getAll` without `storeId` would answer from
+  // the worker's own (regular-profile) store — omitting the incognito session and
+  // handing back regular cookies in its place.
+  const stub = createStubChrome({
+    cookies: [{ name: 'sid', value: 's', path: '/' }],
+    partitioned: [{ name: 'part', value: 'p', path: '/' }],
+    cookieStores: [
+      { id: '0', tabIds: [7] },
+      { id: '1', tabIds: [1] },
+    ],
+  });
+  const outcome = await createSource(stub).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+
+  assert.equal(outcome.ok, true);
+  assert.equal(stub.calls.getAll.length, 2);
+  for (const details of stub.calls.getAll) {
+    assert.equal(details.storeId, '1', '两个查询都必须落在 Work Tab 自己的 store 上');
+  }
+
+  // A tab no store claims keeps the default rather than guessing one.
+  const orphan = createStubChrome({ cookieStores: [{ id: '0', tabIds: [99] }] });
+  assert.equal((await createSource(orphan).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` })).ok, true);
+  for (const details of orphan.calls.getAll) {
+    assert.equal('storeId' in details, false);
+  }
+
+  // Failing to enumerate stores is reported instead of silently using the default.
+  const failing = createStubChrome({ failCookieStores: true });
+  const refused = await createSource(failing).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+  assert.match(refused.message, /store/);
+  assert.deepEqual(failing.calls.getAll, []);
+});
+
 test('withheld access to a cross-origin target is reported, not answered with an empty set', async () => {
   // Site access is per origin: the Work Tab stays scriptable while the CDN's cookies
   // are filtered out silently, so "no cookies" and "not allowed to look" are
@@ -683,6 +726,8 @@ function createFakeConnection({ url = 'ws://service.test' } = {}) {
 function createFakeWorkTab(initial = {}) {
   const state = { isBound: true, tabId: 42, reason: null, ...initial };
   return {
+    /** Set by a test that wants the manager's snapshot to land during a read. */
+    settle: null,
     get isBound() {
       return state.isBound;
     },
@@ -694,6 +739,10 @@ function createFakeWorkTab(initial = {}) {
     },
     set(next) {
       Object.assign(state, next);
+    },
+    async settled() {
+      // Models `createWorkTabManager.settled()`: a pending refresh lands here.
+      if (typeof this.settle === 'function') await this.settle();
     },
   };
 }
@@ -860,6 +909,28 @@ test('forwards the provider error and refuses a context JSON would rewrite', asy
   await unserializable.bridge.handleMessage(askContext('rc-8'));
   assert.equal(unserializable.connection.sent.at(-1).ok, false);
   assert.equal(unserializable.connection.sent.at(-1).error.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+});
+
+test('waits for a pending Work Tab snapshot before revalidating the binding', async () => {
+  const workTab = createFakeWorkTab();
+  // The refresh that discovers the second tab only lands when someone awaits it —
+  // exactly the window the revalidation has to close.
+  workTab.settle = () => workTab.set({ isBound: false, tabId: null, reason: 'MULTIPLE_TABS' });
+
+  const connection = createFakeConnection();
+  const bridge = createBridgeState({
+    connection,
+    workTab,
+    executor: createControlledExecutor(),
+    requestContext: createContextProvider(),
+  });
+
+  await bridge.handleMessage(askContext('rc-12'));
+
+  const reply = connection.sent.at(-1);
+  assert.equal(reply.ok, false);
+  assert.equal(reply.error.code, CONTEXT_ERROR_CODES.NOT_READY);
+  assert.match(reply.error.message, /MULTIPLE_TABS/);
 });
 
 test('a context is not disclosed when the Work Tab binding changed while it was read', async () => {

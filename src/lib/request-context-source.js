@@ -118,6 +118,28 @@ export function createRequestContextSource(options = {}) {
   }
 
   /**
+   * Which cookie store the Work Tab lives in.
+   *
+   * With the extension enabled in Incognito (the manifest's default `spanning`
+   * mode) an incognito tab has its **own** cookie store, while `getAll` without a
+   * `storeId` answers from the service worker's store — the regular profile. That
+   * would omit the incognito session and hand back matching regular-profile cookies
+   * instead, so the store is resolved from the tab rather than assumed. A tab no
+   * store claims keeps the default (the worker's own store) and says so.
+   */
+  async function resolveStoreId(tabId) {
+    const { cookies } = resolveApis();
+    if (typeof cookies?.getAllCookieStores !== 'function') return { ok: true, storeId: undefined };
+    try {
+      const stores = (await cookies.getAllCookieStores()) ?? [];
+      const store = stores.find((candidate) => (candidate?.tabIds ?? []).includes(tabId));
+      return { ok: true, storeId: store?.id };
+    } catch (error) {
+      return { ok: false, reason: describeError(error) };
+    }
+  }
+
+  /**
    * Does the extension still have access to this origin?
    *
    * `chrome.cookies.getAll` filters **silently** by host permission, so with site
@@ -207,13 +229,17 @@ export function createRequestContextSource(options = {}) {
     }
 
     const { cookies } = resolveApis();
+    const store = await resolveStoreId(request.tabId);
+    if (!store.ok) return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `无法确定 Work Tab 的 cookie store：${store.reason}`);
+    const storeFilter = store.storeId === undefined ? {} : { storeId: store.storeId };
+
     let all;
     try {
-      const unpartitioned = await cookies.getAll({ url: target.url });
+      const unpartitioned = await cookies.getAll({ url: target.url, ...storeFilter });
       const partitioned =
         partition.partitionKey === null
           ? []
-          : await cookies.getAll({ url: target.url, partitionKey: partition.partitionKey });
+          : await cookies.getAll({ url: target.url, ...storeFilter, partitionKey: partition.partitionKey });
       all = mergeCookieSets(unpartitioned, partitioned);
     } catch (error) {
       return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `chrome.cookies 读取失败：${describeError(error)}`);

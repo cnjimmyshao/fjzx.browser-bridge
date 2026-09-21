@@ -247,6 +247,18 @@ export function createBridgeState({
     // while it runs: a second ordinary tab makes Bridge NOT_READY for exactly this
     // request. Answering anyway would disclose a context sampled from a tab it can
     // no longer identify — data the Service could not have obtained a moment later.
+    //
+    // A refresh may still be in flight (the manager deliberately keeps the previous
+    // binding visible until its `tabs.query()` answers), so the current snapshot is
+    // awaited first; otherwise this check would read the stale binding it is meant
+    // to catch.
+    if (typeof workTab.settled === 'function') {
+      try {
+        await workTab.settled();
+      } catch (error) {
+        logger.warn?.('[bridge] waiting for the work tab snapshot failed', error);
+      }
+    }
     if (!workTab.isBound || workTab.tabId !== sampledTabId) {
       reply(
         createRequestContextError(

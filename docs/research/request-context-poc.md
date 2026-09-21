@@ -313,8 +313,9 @@ cookie: sid=…; theme=…; strict=…
 8. **未做 incognito / 企业策略路径**：`runtime_blocked_hosts` 可能让 `getAll` 返回空或失败；实现里需要降级分支。
 9. **同名 cookie 的顺序无法完全复现**：分区与非分区可以同名同 path，浏览器按 path + 创建时间排序后两份都发；API 不暴露创建时间，因此同一 path 长度内的顺序做不到逐字复现。实现选择**显式报告**（`duplicateCookieNames`）而不是猜。实测里 cookie 顺序与浏览器一致的场景，都是没有同名冲突的情况。
 10. **页面读不到就是失败，不会降级**：若用户限制了扩展对该站点的访问，`chrome.scripting` 会拒绝执行——而此时 `chrome.cookies` 也在静默过滤，所以实现直接返回 `CONTEXT_FAILED`，而不是回退到 worker 自己的 UA 交出一份"看起来完整"的上下文。
-11. **采样期间绑定变化会被拦下**：读取是异步的，期间出现第二个普通 Tab 会让 Bridge 变成 `MULTIPLE_TABS`；这种情况下请求会得到 `NOT_READY`，而不是继续披露按旧绑定采到的上下文。
-12. **需求侧证据显示当前用不上 Cookie**（[04](notes/04-service-side-need.md)）：`pr-douyin` 不发 Cookie 也能下四类媒体；`media_fetch_http_403`（9/416）的成因未知。**在拿到真实失败复现之前，扩大权限面的收益无法证明。**
+11. **采样期间绑定变化会被拦下**：读取是异步的，期间出现第二个普通 Tab 会让 Bridge 变成 `MULTIPLE_TABS`；实现会先等 Work Tab 的当前快照（`settled()`）再复验绑定，变化时返回 `NOT_READY`，而不是继续披露按旧绑定采到的上下文。
+12. **隐身窗口要走对的 cookie store**：扩展在隐身模式下启用时，隐身 Tab 有自己的 store；不传 `storeId` 的 `getAll` 会读到普通 profile 的 store（既漏掉隐身会话，又可能把普通 profile 的 cookie 交出去）。实现用 `getAllCookieStores()` 按 `tabId` 解析 store 并显式传入；没有任何 store 认领该 Tab 时退回默认 store（不猜）。
+13. **需求侧证据显示当前用不上 Cookie**（[04](notes/04-service-side-need.md)）：`pr-douyin` 不发 Cookie 也能下四类媒体；`media_fetch_http_403`（9/416）的成因未知。**在拿到真实失败复现之前，扩大权限面的收益无法证明。**
 
 ---
 
