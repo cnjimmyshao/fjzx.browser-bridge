@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
 import { existsSync } from 'node:fs';
 import { test } from 'node:test';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { launchBrowser } from './poc/browser.mjs';
+import { launchBrowser, openPage } from './poc/browser.mjs';
+import { startTestService } from './poc/service.mjs';
 
 /**
  * Guards on the POC harness itself.
@@ -132,5 +134,91 @@ test('调试端口已被占用时拒绝启动，且不碰 profile', async () => 
     assert.equal(existsSync(profile), false, '拒绝时不应创建 profile');
   } finally {
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('端口会接受连接但不回应时，同样算被占用（探测必须有超时）', async () => {
+  // A socket that accepts and then says nothing. An unbounded probe would await
+  // forever, so launchBrowser would never even spawn — the whole run would hang.
+  const sockets = [];
+  const server = createTcpServer((socket) => sockets.push(socket));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const started = Date.now();
+
+  try {
+    await assert.rejects(
+      launchBrowser({
+        exe: process.execPath,
+        extensionPath: 'unused',
+        port,
+        profile: join(tmpdir(), `bridge-poc-wedged-${port}`),
+      }),
+      /已经有另一个浏览器/,
+    );
+    assert.ok(Date.now() - started < 10000, '探测必须在超时后放弃，而不是一直等');
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('openPage 返回新建的 target，而不是已存在的同前缀页面', async () => {
+  // Reproduces the real hazard: `chrome://extensions` is still closing when
+  // `allowUserScripts()` opens `chrome://extensions/?id=…`. Matching by URL prefix
+  // (with the query stripped) hands back the overview page.
+  const server = createServer((request, response) => {
+    const path = new URL(request.url, 'http://127.0.0.1').pathname;
+    response.writeHead(200, { 'content-type': 'application/json' });
+    if (path === '/json/new') {
+      response.end(JSON.stringify({ id: 'new-target', url: 'chrome://extensions/?id=abc', type: 'page' }));
+      return;
+    }
+    response.end(
+      JSON.stringify([
+        { id: 'old-overview', url: 'chrome://extensions/', type: 'page' },
+        { id: 'new-target', url: 'chrome://extensions/?id=abc', type: 'page' },
+      ]),
+    );
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  try {
+    assert.equal(await openPage(port, 'chrome://extensions/?id=abc'), 'new-target');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('execute 复用 jobId 时不会返回上一次的 RESULT', async () => {
+  const service = await startTestService();
+  const socket = new WebSocket(service.url);
+  let replies = 0;
+
+  socket.addEventListener('message', (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type !== 'EXECUTE') return;
+    replies += 1;
+    socket.send(
+      JSON.stringify({ type: 'RESULT', jobId: message.jobId, ok: true, data: `reply-${replies}` }),
+    );
+  });
+  await new Promise((resolve, reject) => {
+    socket.addEventListener('open', resolve, { once: true });
+    socket.addEventListener('error', reject, { once: true });
+  });
+
+  try {
+    const first = await service.execute({ jobId: 'reused', script: 'return 1;' });
+    assert.equal(first.data, 'reply-1');
+
+    // Same jobId again: the first RESULT is already in history, and the protocol
+    // only requires jobId to tie one EXECUTE to its own RESULT.
+    const second = await service.execute({ jobId: 'reused', script: 'return 2;' });
+    assert.equal(second.data, 'reply-2');
+  } finally {
+    socket.close();
+    await service.stop();
   }
 });

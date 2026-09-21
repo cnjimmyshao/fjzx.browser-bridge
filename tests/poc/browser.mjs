@@ -59,6 +59,20 @@ export function findBrowser(explicit) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Every DevTools HTTP call is bounded by this. */
+const HTTP_TIMEOUT_MS = 5000;
+
+/**
+ * A bounded DevTools HTTP request.
+ *
+ * A port can accept a connection and then never answer — a wedged browser, or an
+ * unrelated TCP service. An unbounded `fetch` would await forever, which for this
+ * harness means `npm run poc` hangs instead of reporting anything.
+ */
+function cdpFetch(url, init = {}, timeoutMs = HTTP_TIMEOUT_MS) {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+}
+
 /** Minimal DevTools Protocol client, one socket per target. */
 async function connect(webSocketDebuggerUrl) {
   const socket = new WebSocket(webSocketDebuggerUrl);
@@ -95,10 +109,28 @@ async function connect(webSocketDebuggerUrl) {
   socket.onerror = () => failPending(new Error('CDP 连接出错'));
 
   return {
-    send(method, params = {}) {
+    /**
+     * @param {string} method
+     * @param {object} [params]
+     * @param {number} [timeoutMs] A target that stops answering must not hang the run.
+     */
+    send(method, params = {}, timeoutMs = 10000) {
       const id = nextId++;
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`CDP ${method} 超时（${timeoutMs}ms）`));
+        }, timeoutMs);
+        pending.set(id, {
+          resolve: (value) => {
+            clearTimeout(timer);
+            resolve(value);
+          },
+          reject: (error) => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        });
         socket.send(JSON.stringify({ id, method, params }));
       });
     },
@@ -115,7 +147,7 @@ async function connect(webSocketDebuggerUrl) {
 
 /** @param {number} port */
 export async function listTargets(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+  const response = await cdpFetch(`http://127.0.0.1:${port}/json/list`);
   return response.json();
 }
 
@@ -141,15 +173,30 @@ export async function evaluate(port, targetId, expression) {
   }
 }
 
-/** @param {number} port @param {string} url @param {number} [timeoutMs] */
+/**
+ * Open a page and return *that* page's target id.
+ *
+ * `/json/new` answers with the target it created, so the id is taken from the
+ * response rather than re-found by URL. Matching on a URL prefix would happily
+ * return an already-open page instead — and because the query string used to be
+ * stripped, `chrome://extensions` and `chrome://extensions/?id=…` collapsed into one
+ * prefix, so the still-closing overview could be handed back to `allowUserScripts()`
+ * in place of the detail view.
+ *
+ * @param {number} port @param {string} url @param {number} [timeoutMs]
+ */
 export async function openPage(port, url, timeoutMs = 15000) {
-  await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
+  const response = await cdpFetch(
+    `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
+    { method: 'PUT' },
+  );
+  const created = await response.json();
+  if (!created?.id) throw new Error(`/json/new 没有返回新标签页：${url}`);
+
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const target = (await listTargets(port)).find(
-      (candidate) => candidate.type === 'page' && candidate.url.startsWith(url.split('?')[0]),
-    );
-    if (target) return target.id;
+    const target = (await listTargets(port)).find((candidate) => candidate.id === created.id);
+    if (target) return created.id;
     await sleep(100);
   }
   throw new Error(`打开页面超时：${url}`);
@@ -157,7 +204,7 @@ export async function openPage(port, url, timeoutMs = 15000) {
 
 /** @param {number} port @param {string} targetId */
 export async function closePage(port, targetId) {
-  await fetch(`http://127.0.0.1:${port}/json/close/${targetId}`);
+  await cdpFetch(`http://127.0.0.1:${port}/json/close/${targetId}`);
 }
 
 /** Ordinary http(s) pages currently open. */
@@ -215,10 +262,10 @@ export async function launchBrowser(options) {
   while (Date.now() < deadline) {
     let version = null;
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      const response = await cdpFetch(`http://127.0.0.1:${port}/json/version`, {}, 2000);
       version = await response.json();
     } catch {
-      version = null; // not up yet
+      version = null; // not up yet, or not answering
     }
 
     if (version) {
@@ -245,13 +292,21 @@ export async function launchBrowser(options) {
   throw new Error(`浏览器调试端口 ${port} 在 30s 内没有就绪`);
 }
 
-/** @param {number} port */
+/**
+ * Is something already serving DevTools on this port?
+ *
+ * Deliberately fail-closed: a request that times out means the port accepted a
+ * connection without ever answering. That is still "not ours", and refusing is far
+ * better than spawning a browser we then cannot distinguish from whatever is there.
+ *
+ * @param {number} port
+ */
 async function isEndpointAlive(port) {
   try {
-    await fetch(`http://127.0.0.1:${port}/json/version`);
+    await cdpFetch(`http://127.0.0.1:${port}/json/version`, {}, 1500);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return error?.name === 'TimeoutError';
   }
 }
 

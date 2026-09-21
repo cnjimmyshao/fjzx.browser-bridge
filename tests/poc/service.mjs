@@ -142,15 +142,19 @@ export async function startTestService(options = {}) {
      */
     async execute(job) {
       const jobId = job.jobId ?? nextJobId();
+      // Marker before sending: `jobId` is only required to associate *this* EXECUTE
+      // with its RESULT, not to be unique for all time. Searching the whole history
+      // would return a stale RESULT when a caller reuses an id.
+      const from = mark();
       const message = { type: 'EXECUTE', jobId, script: job.script };
       if ('input' in job) message.input = job.input;
       send(message);
       const frames = await waitFor(
-        (all) => all.some((m) => m.type === 'RESULT' && m.jobId === jobId),
+        (all) => all.slice(from).some((m) => m.type === 'RESULT' && m.jobId === jobId),
         job.timeoutMs ?? 8000,
         `等待 ${jobId} 的 RESULT 超时`,
       );
-      return frames.filter((m) => m.type === 'RESULT' && m.jobId === jobId).at(-1);
+      return frames.slice(from).filter((m) => m.type === 'RESULT' && m.jobId === jobId).at(-1);
     },
 
     /**
