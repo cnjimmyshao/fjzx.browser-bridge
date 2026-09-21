@@ -37,6 +37,7 @@ export const PARSE_FAILURES = Object.freeze({
   UNKNOWN_TYPE: 'UNKNOWN_TYPE',
   MISSING_JOB_ID: 'MISSING_JOB_ID',
   MISSING_SCRIPT: 'MISSING_SCRIPT',
+  UNSUPPORTED_INPUT: 'UNSUPPORTED_INPUT',
 });
 
 function isPlainObject(value) {
@@ -109,7 +110,19 @@ export function parseServiceMessage(raw) {
 
   // `input` and `metadata` are carried through untouched and never interpreted:
   // giving them meaning would put Service business semantics inside Bridge.
-  if ('input' in parsed) message.input = parsed.input;
+  if ('input' in parsed) {
+    // Valid JSON is not automatically a JSON-compatible JS value: `1e400` parses
+    // to Infinity and `-0` stays -0, and passing those on would silently change
+    // what the script receives. Refusing is the honest option.
+    if (!isJsonCompatible(parsed.input)) {
+      return fail(
+        PARSE_FAILURES.UNSUPPORTED_INPUT,
+        'input 不是 JSON-compatible（只支持 null/boolean/有限 number/string/array/plain object）。',
+        jobId,
+      );
+    }
+    message.input = parsed.input;
+  }
   if ('metadata' in parsed) message.metadata = parsed.metadata;
 
   return { ok: true, message };
@@ -143,89 +156,110 @@ export function createResultError(jobId, code, message) {
 }
 
 /**
- * Is this value something the wire format can carry without changing it?
+ * Build the check that decides whether a value is JSON-compatible.
  *
  * `JSON.stringify` succeeding is not the same test: it quietly turns `NaN` and
  * `Infinity` into `null`, drops `undefined`, function-valued, symbol-keyed and
  * non-enumerable properties, flattens a `Map` to `{}` and fills array holes with
  * `null`. Emitting `ok: true` with data the script never returned would be worse
- * than reporting a failure, so the supported types are checked explicitly
- * against what the architecture allows: null, boolean, number, string, array and
- * plain object.
+ * than reporting a failure, so the supported types are checked explicitly against
+ * what the architecture allows: null, boolean, number, string, array and plain
+ * object.
  *
- * Total by construction: reading a property can run a getter that throws, and a
- * predicate that throws would escape as an unhandled failure instead of a
- * verdict.
+ * **A factory, and self-contained, on purpose.** Its source is injected into the
+ * page by the executor, where it must be built *before* the Service body runs:
+ * the check reads `Reflect.ownKeys`, `Object.getOwnPropertyDescriptor` and
+ * friends, and the body shares that world, so a body that reassigns them
+ * (`Reflect.ownKeys = () => []`) would otherwise be validating itself. Capturing
+ * them here — in the extension, and in the page before the body exists — means
+ * exactly one implementation decides what a JSON-compatible value is, and nothing
+ * the value does can change the answer.
  *
- * @param {unknown} value
- * @returns {boolean}
+ * @returns {(value: unknown) => boolean}
  */
-export function isJsonCompatible(value) {
-  try {
-    return checkJsonCompatible(value, new Set());
-  } catch {
-    // A value whose contents cannot even be inspected is not one Bridge can
-    // promise to deliver unchanged.
-    return false;
-  }
-}
+export function createJsonCompatibilityCheck() {
+  // Captured once, before any value being checked can run code of its own.
+  const ownKeys = Reflect.ownKeys;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = Object.getPrototypeOf;
+  const isArray = Array.isArray;
+  const isFinite = Number.isFinite;
+  const is = Object.is;
+  const objectPrototype = Object.prototype;
+  const toKey = String;
+  const toNumber = Number;
 
-/**
- * @param {unknown} value
- * @param {Set<object>} path objects on the current branch, to detect cycles
- *   without rejecting a value that merely appears twice
- */
-function checkJsonCompatible(value, path) {
-  if (value === null) return true;
+  /**
+   * The branch currently being walked, indexed by depth.
+   *
+   * An explicit depth beats `push`/`pop`/`indexOf`: those are prototype methods,
+   * and a Service body shares this world, so an accidental polyfill on
+   * `Array.prototype` would otherwise change what the check sees.
+   */
+  const branch = [];
 
-  switch (typeof value) {
-    case 'string':
-    case 'boolean':
-      return true;
-    case 'number':
-      // NaN and Infinity have no JSON spelling; they would silently become null.
-      // -0 does have one, but not through JSON.stringify, which emits 0 — so it is
-      // refused rather than quietly normalized.
-      return Number.isFinite(value) && !Object.is(value, -0);
-    case 'object':
-      break;
-    default:
-      // undefined, function, symbol, bigint
-      return false;
-  }
+  const check = (candidate, depth) => {
+    if (candidate === null) return true;
 
-  if (path.has(value)) return false; // a cycle cannot be serialized
-  path.add(value);
-  try {
-    if (Array.isArray(value)) {
-      // JSON keeps exactly the canonical indices below `length`, so anything else
-      // — a hole, a key like `4294967295`, a named property, a symbol key, a
-      // non-enumerable index, or a `toJSON` that JSON.stringify would call instead
-      // of reading the array — changes the value on the way out.
-      const indices = [];
-      for (let index = 0; index < value.length; index += 1) indices.push(String(index));
+    switch (typeof candidate) {
+      case 'string':
+      case 'boolean':
+        return true;
+      case 'number':
+        // NaN and Infinity have no JSON spelling; they would silently become
+        // null. -0 has one, but not through JSON.stringify, which emits 0 — so it
+        // is refused rather than quietly normalized.
+        return isFinite(candidate) && !is(candidate, -0);
+      case 'object':
+        break;
+      default:
+        // undefined, function, symbol, bigint
+        return false;
+    }
 
-      const expected = new Set(['length', ...indices]);
-      for (const key of Reflect.ownKeys(value)) {
-        if (typeof key !== 'string' || !expected.has(key)) return false;
+    for (let i = 0; i < depth; i += 1) {
+      if (branch[i] === candidate) return false; // a cycle cannot be serialized
+    }
+    branch[depth] = candidate;
+    const next = depth + 1;
+
+    if (isArray(candidate)) {
+      const keys = ownKeys(candidate);
+
+      // JSON keeps exactly the canonical indices below `length`, so any other
+      // own key — a hole, `"-1"`, `"NaN"`, `4294967295`, a named property, a
+      // symbol key, a non-enumerable index, or a `toJSON` that JSON.stringify
+      // would call instead of reading the array — changes the value on the way
+      // out.
+      let indexKeys = 0;
+      for (let i = 0; i < keys.length; i += 1) {
+        const key = keys[i];
+        if (key === 'length') continue;
+        if (typeof key !== 'string') return false;
+        const numeric = toNumber(key);
+        if (!isFinite(numeric) || numeric < 0) return false;
+        if (toKey(numeric) !== key) return false; // non-canonical, e.g. "01"
+        if (numeric >= candidate.length) return false;
+        indexKeys += 1;
       }
+      if (indexKeys !== candidate.length) return false; // a hole
 
-      for (const index of indices) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, index);
+      for (let index = 0; index < candidate.length; index += 1) {
+        const descriptor = getOwnPropertyDescriptor(candidate, toKey(index));
         if (descriptor === undefined) return false; // a hole
         if (!descriptor.enumerable) return false;
-        // An accessor could yield a different value when it is read again during
-        // serialization — or throw, after the Job has already been cleared.
+        // An accessor could yield a different value when it is read again, or
+        // throw, after the Job has already been cleared.
         if (descriptor.get !== undefined || descriptor.set !== undefined) return false;
-        if (!checkJsonCompatible(descriptor.value, path)) return false;
+        if (!check(descriptor.value, next)) return false;
       }
       return true;
     }
 
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      // Date, Map, Set, RegExp, typed arrays: all of them change shape on the way
-      // out, so none of them is "the value the script returned".
+    const prototype = getPrototypeOf(candidate);
+    if (prototype !== objectPrototype && prototype !== null) {
+      // Date, Map, Set, RegExp, typed arrays, DOM nodes: all of them change
+      // shape on the way out, so none of them is "the value the script returned".
       return false;
     }
 
@@ -234,18 +268,31 @@ function checkJsonCompatible(value, path) {
     // tell. An accessor is rejected as well because reading it twice can yield
     // two different values: the one that was validated need not be the one that
     // gets sent.
-    for (const key of Reflect.ownKeys(value)) {
+    const keys = ownKeys(candidate);
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
       if (typeof key !== 'string') return false;
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      const descriptor = getOwnPropertyDescriptor(candidate, key);
       if (!descriptor.enumerable) return false;
       if (descriptor.get !== undefined || descriptor.set !== undefined) return false;
-      if (!checkJsonCompatible(descriptor.value, path)) return false;
+      if (!check(descriptor.value, next)) return false;
     }
     return true;
-  } finally {
-    path.delete(value);
-  }
+  };
+
+  return (value) => {
+    try {
+      return check(value, 0);
+    } catch {
+      // A value whose contents cannot even be inspected is not one Bridge can
+      // promise to deliver unchanged.
+      return false;
+    }
+  };
 }
+
+/** The check the extension uses; see `createJsonCompatibilityCheck`. */
+export const isJsonCompatible = createJsonCompatibilityCheck();
 
 /**
  * @param {string} state one of IDLE / RUNNING / NOT_READY

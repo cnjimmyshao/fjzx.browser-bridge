@@ -3,7 +3,8 @@
   "name": "Browser Bridge",
   "version": "0.1.0",
   "description": "Generic, site-agnostic browser bridge. Runs Service-provided JavaScript in a single Work Tab and returns the technical result.",
-  "permissions": ["storage", "tabs"],
+  "permissions": ["storage", "tabs", "userScripts"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"

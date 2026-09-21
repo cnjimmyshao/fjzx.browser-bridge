@@ -20,16 +20,29 @@ test('manifest is valid JSON and declares Manifest V3', () => {
 test('permissions stay at the minimum V1 needs', () => {
   // Every addition must be deliberate, so permission creep shows up as a reviewed
   // diff instead of slipping in:
-  //   storage — the single Service URL (V1.1)
-  //   tabs    — `tab.url` is redacted without it, and identifying the one
-  //             ordinary web tab means reading that tab's scheme (V1.3). It
-  //             grants no page-content access and no host permission.
-  assert.deepEqual(manifest.permissions, ['storage', 'tabs']);
+  //   storage     — the single Service URL (V1.1)
+  //   tabs        — `tab.url` and `changeInfo.url` (V1.3). Host permissions cover
+  //                 http(s) but cannot cover `chrome://`, so without `tabs` a Work
+  //                 Tab navigating to a browser page goes unnoticed and keeps being
+  //                 reported as bound (verified).
+  //   userScripts — running Service JavaScript at all (V1.5)
+  assert.deepEqual(manifest.permissions, ['storage', 'tabs', 'userScripts']);
 });
 
-test('no host permissions are requested', () => {
-  // Bridge is site-agnostic: it never declares which sites it may touch.
-  for (const key of ['host_permissions', 'optional_host_permissions', 'optional_permissions']) {
+test('the only host permission is <all_urls>, which names no site', () => {
+  // chrome.userScripts.execute() refuses to touch a tab the extension holds no
+  // host permission for (verified), so host access is part of V1's execution
+  // mechanism rather than an optional extra. <all_urls> names no site, which is
+  // what keeps Bridge site-agnostic: every site is treated identically and no
+  // platform knowledge is encoded anywhere in the manifest.
+  assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
+  for (const pattern of manifest.host_permissions) {
+    assert.match(pattern, /[*<]/, `${pattern} 不应是具体站点`);
+  }
+});
+
+test('no optional permissions are requested', () => {
+  for (const key of ['optional_host_permissions', 'optional_permissions']) {
     assert.equal(key in manifest, false, `manifest 不得包含 ${key}`);
   }
 });

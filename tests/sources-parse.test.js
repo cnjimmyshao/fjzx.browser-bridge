@@ -69,3 +69,29 @@ test('every extension source file is valid UTF-8', () => {
 
   assert.deepEqual(offenders, [], `以下文件不是合法 UTF-8：${offenders.join(', ')}`);
 });
+
+/**
+ * The architecture forbids evaluating Service code inside the extension worker:
+ * it runs in the Work Tab's USER_SCRIPT world through the userScripts API, or it
+ * does not run at all. `eval` or `new Function` here would mean Service code
+ * executing with the extension's own privileges, which is exactly what the design
+ * is arranged to avoid.
+ */
+test('no source file evaluates Service code inside the extension', () => {
+  const forbidden = [
+    [/\beval\s*\(/, 'eval('],
+    [/new\s+Function\s*\(/, 'new Function('],
+    [/Function\s*\(\s*['"`]/, 'Function("...")'],
+  ];
+  const offenders = [];
+
+  for (const file of listFiles(extensionRoot)) {
+    if (!file.endsWith('.js')) continue;
+    const text = readFileSync(file, 'utf8');
+    for (const [pattern, label] of forbidden) {
+      if (pattern.test(text)) offenders.push(`${file.slice(extensionRoot.length + 1)}: ${label}`);
+    }
+  }
+
+  assert.deepEqual(offenders, [], `发现动态求值：\n${offenders.join('\n')}`);
+});

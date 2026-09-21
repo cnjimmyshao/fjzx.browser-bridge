@@ -50,10 +50,53 @@ test('input and metadata are optional and are not invented when absent', () => {
   assert.equal(result.message.script, '');
 });
 
+test('input that valid JSON turns into a non-JSON value is refused', () => {
+  // `1e400` is valid JSON that parses to Infinity, and `-0` stays -0: passing
+  // either on would silently change what the script receives.
+  const overflow = parseServiceMessage(
+    '{"type":"EXECUTE","jobId":"job-in","script":"return 1;","input":1e400}',
+  );
+  assert.equal(overflow.ok, false);
+  assert.equal(overflow.failure, PARSE_FAILURES.UNSUPPORTED_INPUT);
+  assert.equal(overflow.jobId, 'job-in', '有 jobId 才能回 RESULT');
+
+  const negativeZero = parseServiceMessage(
+    '{"type":"EXECUTE","jobId":"job-in2","script":"return 1;","input":{"n":-0}}',
+  );
+  assert.equal(negativeZero.ok, false);
+  assert.equal(negativeZero.failure, PARSE_FAILURES.UNSUPPORTED_INPUT);
+
+  const nested = parseServiceMessage(
+    '{"type":"EXECUTE","jobId":"job-in3","script":"x","input":{"deep":[1,1e400]}}',
+  );
+  assert.equal(nested.ok, false, '嵌套的 Infinity 同样要拒绝');
+  assert.equal(nested.failure, PARSE_FAILURES.UNSUPPORTED_INPUT);
+});
+
+test('ordinary JSON input still passes through untouched', () => {
+  const result = parseServiceMessage(
+    JSON.stringify({
+      type: 'EXECUTE',
+      jobId: 'job-in4',
+      script: 'return input;',
+      input: { s: 'x', n: 1.5, b: false, nil: null, arr: [1, 'two'], obj: { a: 1 } },
+    }),
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.message.input, {
+    s: 'x',
+    n: 1.5,
+    b: false,
+    nil: null,
+    arr: [1, 'two'],
+    obj: { a: 1 },
+  });
+});
+
 test('parses GET_STATUS, which needs nothing else', () => {
   const result = parseServiceMessage(JSON.stringify({ type: 'GET_STATUS' }));
-  assert.deepEqual(result, { ok: true, message: { type: 'GET_STATUS' } });
-});
+  assert.deepEqual(result, { ok: true, message: { type: 'GET_STATUS' } });});
 
 test('rejects anything that is not a text frame', () => {
   for (const raw of [undefined, null, 42, {}, [], Buffer.from('{}')]) {
@@ -288,6 +331,22 @@ test('refuses array keys that are not indices inside the length', () => {
   assert.equal(isJsonCompatible(hiddenIndex), false);
 
   assert.equal(isJsonCompatible(new Array(0)), true);
+});
+
+test('refuses negative and non-finite array property names', () => {
+  // These round-trip through Number/String, so only an explicit range and
+  // finiteness check rejects them — yet JSON drops them from the array.
+  for (const key of ['-1', 'NaN', '-Infinity', 'Infinity', '1.5', '1e3']) {
+    const value = [];
+    value[key] = 'x';
+    assert.equal(isJsonCompatible(value), false, `空数组上的 ${key} 应被拒绝`);
+  }
+
+  const withNegative = [1, 2];
+  withNegative['-1'] = 'x';
+  assert.equal(isJsonCompatible(withNegative), false);
+
+  assert.equal(isJsonCompatible([1, 2]), true);
 });
 
 test('refuses accessor-backed array elements', () => {
