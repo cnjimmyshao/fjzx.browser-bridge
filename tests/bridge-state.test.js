@@ -220,7 +220,7 @@ test('EXECUTE while NOT_READY is refused without starting the executor', async (
       type: 'RESULT',
       jobId: 'job-4',
       ok: false,
-      error: { code: ERROR_CODES.NOT_READY, message: '没有可用的 Work Tab（NO_WORK_TAB）。' },
+      error: { code: ERROR_CODES.NOT_READY, message: 'Bridge 当前不可用（NO_WORK_TAB）。' },
     },
   ]);
   assert.equal(h.bridge.state, BRIDGE_STATES.NOT_READY);
@@ -396,6 +396,44 @@ test('a frame delivered on the current endpoint is handled normally', async () =
   assert.deepEqual(h.connection.sent, [
     { type: 'RESULT', jobId: 'job-19', ok: true, data: 'ok' },
   ]);
+});
+
+test('a bound Work Tab is not enough when the platform will not run scripts', async () => {
+  // The API being unavailable is a technical state, so it is reported as
+  // NOT_READY rather than letting a Job be accepted and then fail obscurely.
+  const executor = { ...createControlledExecutor(), isAvailable: () => false };
+  const h = createHarness({ executor });
+
+  await h.bridge.handleMessage(JSON.stringify({ type: 'GET_STATUS' }));
+  assert.deepEqual(h.connection.sent, [
+    { type: 'STATUS', state: 'NOT_READY', reason: 'USER_SCRIPTS_UNAVAILABLE' },
+  ]);
+  assert.equal(h.bridge.notReadyReason, 'USER_SCRIPTS_UNAVAILABLE');
+
+  await h.bridge.handleMessage(execute('job-24'));
+  assert.equal(h.executor.calls.length, 0, '不可用时不得启动 executor');
+  assert.equal(h.connection.sent.at(-1).error.code, ERROR_CODES.NOT_READY);
+  assert.match(h.connection.sent.at(-1).error.message, /USER_SCRIPTS_UNAVAILABLE/);
+});
+
+test('a Work Tab problem outranks an unavailable API in the reported reason', async () => {
+  const executor = { ...createControlledExecutor(), isAvailable: () => false };
+  const h = createHarness({
+    executor,
+    workTab: createFakeWorkTab({ isBound: false, tabId: null, reason: 'MULTIPLE_TABS' }),
+  });
+
+  await h.bridge.handleMessage(JSON.stringify({ type: 'GET_STATUS' }));
+
+  assert.deepEqual(h.connection.sent, [
+    { type: 'STATUS', state: 'NOT_READY', reason: 'MULTIPLE_TABS' },
+  ]);
+});
+
+test('an executor without an availability probe is treated as available', async () => {
+  const h = createHarness();
+  await h.bridge.handleMessage(JSON.stringify({ type: 'GET_STATUS' }));
+  assert.deepEqual(h.connection.sent, [{ type: 'STATUS', state: 'IDLE' }]);
 });
 
 test('a Job that resolves with undefined still produces a JSON-compatible RESULT', async () => {

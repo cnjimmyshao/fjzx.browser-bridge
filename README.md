@@ -47,8 +47,8 @@ Bridge 当前状态：
 2. ✅ WebSocket 连接 Service；
 3. ✅ 自动识别唯一 Work Tab；
 4. ✅ 接收 EXECUTE；
-5. 使用 `chrome.userScripts.execute()` 在 USER_SCRIPT world 执行 JavaScript；
-6. ✅ 主动 Push RESULT（协议已通；执行本身仍是 stub，见 #6）；
+5. ✅ 使用 `chrome.userScripts.execute()` 在 USER_SCRIPT world 执行 JavaScript；
+6. ✅ 主动 Push RESULT；
 7. ✅ 支持 GET_STATUS / STATUS。
 
 ## 协议与状态
@@ -69,6 +69,31 @@ Bridge 状态只有 `IDLE` / `RUNNING` / `NOT_READY`，而且是**推导出来�
 一个 Bridge 同时只跑一个 Job：`RUNNING` 期间再来的 `EXECUTE` 立刻回 `BUSY`，**不排队、不抢占**，第一个 Job 完全不受影响。没有 Queue、History、Retry、幂等或 exactly-once；Job 结束后不保留任何结果。
 
 无法解析的帧不会打断连接：JSON 非法或没有可用 `jobId` 时只记录并忽略（V1 没有 ERROR 消息可用）；若失败帧仍带有可用 `jobId`，则用 `SCRIPT_EXECUTION_FAILED` 回一个 `RESULT`，免得 Service 一直空等。
+
+## 脚本执行
+
+Service 下发的 `script` 是**一个 async 函数的函数体**，用 `return` 给出结果，可以 `await`：
+
+```js
+const title = document.querySelector('h1').textContent;
+document.getElementById('go').click();
+await new Promise((r) => setTimeout(r, 100));
+return { title, out: document.getElementById('out').textContent };
+```
+
+`input` 是该函数的参数（缺省为 `null`）。脚本在 Work Tab **主框架**的 `USER_SCRIPT` world 中执行——隔离世界，能操作 DOM，但看不到页面自己 world 里的变量；**MAIN world 在 V1 中不开放**。
+
+### 运行前的一次性设置
+
+Chrome 138 起，`chrome.userScripts` 需要**每个扩展单独授权**：在 `chrome://extensions` 的扩展详情页打开 **Allow User Scripts**。未开启时该 API 在扩展里根本不存在（`undefined`，不是抛错），Bridge 会如实报告 `NOT_READY / USER_SCRIPTS_UNAVAILABLE`；开启后**无需重启**即生效。
+
+### 错误如何映射
+
+`SCRIPT_EXECUTION_FAILED` 覆盖：脚本抛异常、脚本语法错误、返回不可稳定序列化的值（DOM 节点、函数、window）、执行期间 Work Tab 消失、以及 API 调用本身失败。
+
+这里必须包一层再执行，原因是一个实测到的 API 行为：**脚本抛异常和语法错误时，`chrome.userScripts.execute()` 都不 reject，而是 resolve 出 `result: null`**——与「脚本显式 `return null`」无法区分。因此 Bridge 注入的代码会在脚本外再套一个信封，把成功值与失败原因分别带回；没有信封的结果一律视为「脚本根本没跑完」。
+
+> 实测环境：Chrome for Testing **153.0.8010.52**。上述行为（含 `result: null`、`Frame with ID 0 was removed.`、host 权限要求、`world: 'MAIN'` 同样可用但 V1 不使用）均已逐条验证。
 
 ## 仓库结构
 
@@ -102,7 +127,17 @@ docs/architecture-v1.md   V1 架构与协议
 
 Bridge 不会创建、关闭、恢复或重排任何 Tab，也不记住 Initial URL——这些都归 Service。受影响的只有 Bridge 的技术状态，页面内容是否"正常"仍由 Service 判断。
 
-> `manifest.json` 因 V1.3 新增了 `tabs` 权限：没有它时 `tab.url` 会被脱敏（已实测为 `undefined`），无法区分普通网页与浏览器页面。它不授予页面内容访问权，也不是 host 权限。
+## 权限
+
+| 权限 | 用途 |
+| --- | --- |
+| `storage` | 唯一持久配置 Service URL；Work Tab 绑定存于 `storage.session` |
+| `userScripts` | 在 Work Tab 的 USER_SCRIPT world 执行 Service JavaScript |
+| `host_permissions: <all_urls>` | `execute()` 要求扩展对目标标签页有 host 权限（实测），否则拒绝执行 |
+
+没有 `optional_permissions`，也没有 content script。`<all_urls>` **不指向任何具体站点**：所有站点一视同仁，manifest 里不编码任何平台知识，因此 Bridge 仍然是"无业务语义"的。
+
+V1.3 曾申请过 `tabs`；加入 host 权限后 `tab.url` 已经可读（实测），该权限已按"最小权限"移除。
 
 ## Service 连接
 

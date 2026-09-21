@@ -1,17 +1,14 @@
 import { createBridgeState } from '../lib/bridge-state.js';
-import { createExecutorStub } from '../lib/executor-stub.js';
 import { createServiceConfigSync } from '../lib/service-config.js';
 import { createServiceConnection } from '../lib/service-connection.js';
 import { createSettingsStore } from '../lib/settings-store.js';
 import { SERVICE_URL_STORAGE_KEY } from '../lib/service-url.js';
+import { createUserScriptExecutor } from '../lib/user-script-executor.js';
 import { createWorkTabManager } from '../lib/work-tab.js';
 
 /**
- * V1.2-V1.4 service worker: keep the Service WebSocket, bind the Work Tab, and
- * run the one Job the Service hands over.
- *
- * Execution is still a stub: V1.4 defines the protocol and the state machine, and
- * the next issue replaces only the executor.
+ * V1.2-V1.5 service worker: keep the Service WebSocket, bind the Work Tab, and
+ * run the one Job the Service hands over in the Work Tab's USER_SCRIPT world.
  *
  * Note that a Manifest V3 worker is not persistent: Chrome may terminate it when
  * idle, which also drops the socket. Every wake-up re-runs this module and
@@ -64,7 +61,7 @@ const workTab = createWorkTabManager({
 const bridge = createBridgeState({
   connection,
   workTab,
-  executor: createExecutorStub(),
+  executor: createUserScriptExecutor({ logger: console }),
   logger: console,
 });
 

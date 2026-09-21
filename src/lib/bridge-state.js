@@ -31,6 +31,14 @@ export const BRIDGE_STATES = Object.freeze({
 });
 
 /**
+ * A NOT_READY reason that is not about tabs: the platform will not run user
+ * scripts at all, so Bridge cannot do its one job until an operator allows it.
+ * The reason itself is the architecture's; what it means is technical, not
+ * business.
+ */
+export const USER_SCRIPTS_UNAVAILABLE = 'USER_SCRIPTS_UNAVAILABLE';
+
+/**
  * Describe a rejection value without ever throwing.
  *
  * A value can carry a `Symbol.toPrimitive` that throws itself, and an escape from
@@ -69,9 +77,20 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
   let currentJob = null;
   let lastState = null;
 
+  /** Why Bridge cannot serve right now, or null when it can. */
+  function notReadyReason() {
+    if (!workTab.isBound) return workTab.reason;
+    // A Work Tab is bound but the platform will not run scripts in it, so a Job
+    // would be accepted and then fail for a reason the Service cannot see.
+    if (typeof executor.isAvailable === 'function' && !executor.isAvailable()) {
+      return USER_SCRIPTS_UNAVAILABLE;
+    }
+    return null;
+  }
+
   function state() {
     if (currentJob !== null) return BRIDGE_STATES.RUNNING;
-    if (!workTab.isBound) return BRIDGE_STATES.NOT_READY;
+    if (notReadyReason() !== null) return BRIDGE_STATES.NOT_READY;
     return BRIDGE_STATES.IDLE;
   }
 
@@ -81,7 +100,7 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
       return createStatus(current, { jobId: currentJob.jobId });
     }
     if (current === BRIDGE_STATES.NOT_READY) {
-      return createStatus(current, { reason: workTab.reason });
+      return createStatus(current, { reason: notReadyReason() });
     }
     return createStatus(current);
   }
@@ -226,10 +245,9 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
       return;
     }
 
-    if (!workTab.isBound) {
-      send(
-        createResultError(message.jobId, ERROR_CODES.NOT_READY, `没有可用的 Work Tab（${workTab.reason}）。`),
-      );
+    const reason = notReadyReason();
+    if (reason !== null) {
+      send(createResultError(message.jobId, ERROR_CODES.NOT_READY, `Bridge 当前不可用（${reason}）。`));
       return;
     }
 
@@ -252,7 +270,7 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
       return currentJob ? currentJob.jobId : null;
     },
     get notReadyReason() {
-      return state() === BRIDGE_STATES.NOT_READY ? workTab.reason : null;
+      return state() === BRIDGE_STATES.NOT_READY ? notReadyReason() : null;
     },
     /** Only for diagnostics; the Service learns state through STATUS. */
     get statusMessage() {
