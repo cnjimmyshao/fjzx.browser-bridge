@@ -105,10 +105,56 @@ src/                      Extension 根目录，Chrome 直接加载此目录
   options/                Options 设置页
 tests/                    node:test 自动化测试
   helpers/ws-server.js    最小 WebSocket 测试服务器（零依赖，仅测试用）
+  poc/                    端到端 POC：测试 Service、测试页面、场景运行器
 docs/architecture-v1.md   V1 架构与协议
 ```
 
 `src/` 就是 Extension 根目录，**没有打包步骤**：Chrome 直接加载 `src/`，因此 `tests/`、`docs/`、`package.json` 不会进入 Extension。
+
+## 从全新 checkout 跑通 POC
+
+不需要 `npm install`：整个项目零第三方依赖，只需要 Node ≥ 22 和一个**能加载未打包扩展的浏览器**。
+
+**1. 准备浏览器。** 品牌版 Chrome 142+ 与 Edge 已忽略 `--load-extension`，因此需要一个 Chrome for Testing：
+
+```powershell
+# 从 https://googlechromelabs.github.io/chrome-for-testing/ 下载 win64 版并解压，然后：
+$env:BROWSER_EXECUTABLE = "C:\path\to\chrome-win64\chrome.exe"
+```
+
+**2. 跑单元与集成测试**（不需要浏览器，约 2 秒）：
+
+```powershell
+npm test            # 等价于 node --test
+```
+
+**3. 跑端到端 POC**（会自己启动浏览器、测试 Service 与本地测试页面）：
+
+```powershell
+npm run poc         # 等价于 node tests/poc/run-poc.mjs
+```
+
+它会自动完成：启动本地测试页面服务器 → 启动最小测试 Service → 启动 Chrome 并加载 `src/` → 在扩展详情页打开 **Allow User Scripts** → 通过真实的设置页保存 Service URL → 依次执行 #7 列出的 12 个场景 → 打印结果并以退出码反映成败。
+
+```text
+  ✔ 1. 首次配置 Service URL 并连接
+  ✔ 2. 唯一业务 Tab → IDLE；GET_STATUS → IDLE
+  ...
+  场景：15/15 通过
+```
+
+常用参数：`--browser <chrome.exe>`、`--port <调试端口>`、`--headed`（显示窗口而不是无头）。
+
+**4. 手工体验（可选）。** 想自己动手而不跑脚本：
+
+1. 打开 `chrome://extensions`，启用「开发者模式」。
+2. 「加载已解压的扩展程序」→ 选择本仓库的 `src/`。
+3. 在该扩展的详情页打开 **Allow User Scripts**（Chrome 138+ 必需，否则 Bridge 报 `NOT_READY / USER_SCRIPTS_UNAVAILABLE`）。
+4. 点击「扩展程序选项」，填写测试 Service 的地址并保存。
+5. 在同一个 Profile 里只留**一个普通网页标签页**作为 Work Tab。
+6. 运行 `node tests/poc/service.mjs --interactive` 之类的自定义脚本，或用你想用的任何 WebSocket 客户端连上去发 `EXECUTE`。
+
+> POC 全程只使用本机地址与本地测试页面，**不依赖任何第三方站点**。
 
 ## Work Tab
 

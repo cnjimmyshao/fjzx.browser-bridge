@@ -53,6 +53,19 @@ JavaScript 统一通过 Chrome userScripts API 在 Work Tab 的 USER_SCRIPT worl
 
 只有 USER_SCRIPT 无法完成、Extension API 可以完成且出现真实需求时，才考虑增加最小 Browser API。V1 可以先不向 Service Script 开放任何额外 Browser API。
 
+### 5.1 实现约束（已由真实浏览器验证）
+
+以下约束是实现过程中由真实 Chrome 行为确定的，属于 V1 协议的组成部分，不是可选的实现细节。
+
+- **脚本是函数体，不是表达式。** `script` 字符串被当作函数体执行，`input` 是该函数的唯一参数，因此脚本内可直接使用 `input`。脚本的返回值必须由脚本自己以 `{ok:true, value}` 或 `{ok:false, error}` 信封形式返回；信封之外的返回值一律视为脚本没有完成执行。
+- **必须使用信封。** `chrome.userScripts.execute()` 在脚本抛错和脚本语法错误两种情况下都以 `result: null` resolve，而不是 reject。因此 Bridge 无法只依赖异常判断失败，必须靠脚本返回信封来区分「执行成功」与「执行失败」。
+- **input 必须是 JSON 兼容值。** `parseServiceMessage` 拒绝 `input` 中出现 `NaN`、`Infinity`、`-0`、稀疏数组、非字符串数组键、Symbol、不可枚举属性、访问器属性、非普通原型和循环引用。`JSON.parse` 能解析但结果不是 JSON 兼容值（例如 `1e400`）的输入同样被拒绝，不会送到页面。
+- **host permission 是硬性前提。** `chrome.userScripts.execute()` 要求 Extension 持有目标页面的 host permission，否则抛出 `Extension manifest must request permission to access this host`。V1 因此声明 `<all_urls>`。该声明不引入任何站点语义，只是让 Bridge 能在任意 Work Tab 上执行 Service 提供的脚本。
+- **Allow User Scripts 开关决定 `chrome.userScripts` 是否存在。** Chrome 138+ 中，用户在 Extension 详情页开启 Allow User Scripts 之前，`chrome.userScripts` 是 `undefined`，不是「调用失败」。Bridge 因此把这种情况与其他 Work Tab 未就绪的情况分开，报 `NOT_READY / USER_SCRIPTS_UNAVAILABLE`，而不是 `SCRIPT_EXECUTION_FAILED`。
+- **只执行主框架。** 执行时固定 `frameIds: [0]`，不执行子框架，也不申请 MAIN world。
+- **`tabs` permission 参与状态判定。** 判断 Work Tab 是否仍然存在、导航去了哪里，需要读取 tab 的 URL；纯 `<all_urls>` host permission 覆盖不到 `chrome://` 等内部页面，无法识别「Work Tab 被导航到内部页面」这一情况。因此 manifest 保留 `tabs`。它同样不包含站点语义。
+- **Work Tab 绑定跨 Service Worker 重启保存。** 绑定的 tab id 写入 `chrome.storage.session`。这是会话级状态，不是持久配置：Service URL 仍然是 V1 唯一必要的持久配置。保存它是为了让 MV3 Service Worker 被回收重启后仍能认出同一个 Work Tab、不要求用户重新选页。
+
 ## 6. Job 模型
 
 一个 Bridge 同一时间只执行一个 Job，不建立 Queue。
@@ -227,3 +240,24 @@ V1 不做 Runtime 系统、多 Tab/并行、Job Queue/History、Retry/幂等、�
 8. Bridge 主动 Push RESULT。
 9. GET_STATUS 返回 IDLE/RUNNING/NOT_READY。
 10. 同一时刻第二个 EXECUTE 返回 BUSY。
+
+## 13. POC 与本文档的对应
+
+`npm run poc` 在真实 Chrome 中跑完整链路，不需要人工操作浏览器。它验证的范围与第 12 节逐条对应：
+
+| 第 12 节验收项 | POC 场景 |
+| --- | --- |
+| 1 设置页可保存 Service URL | 1 |
+| 2 Bridge 可通过 WebSocket 连接 Service | 1、11 |
+| 3 自动绑定唯一普通 Work Tab | 2 |
+| 4 多 Tab/无 Tab 报告 NOT_READY | 9、10 |
+| 5 Service 可发送 EXECUTE + script + input | 3、5 |
+| 6 通过 userScripts 在 USER_SCRIPT world 执行 | 3、4、附加「脚本在隔离世界运行」 |
+| 7 Script 返回 JSON-compatible data | 3、5 |
+| 8 Bridge 主动 Push RESULT | 3、4、8 |
+| 9 GET_STATUS 返回 IDLE/RUNNING/NOT_READY | 2、6、9 |
+| 10 第二个 EXECUTE 返回 BUSY | 7 |
+
+另外覆盖：第 5.1 节所述的 `USER_SCRIPTS_UNAVAILABLE` 前置条件、脚本抛错返回 `SCRIPT_EXECUTION_FAILED`（场景 8）、Service 断开后自动重连（场景 11）、Bridge 不产生业务状态（场景 12）、非法帧不打断连接。
+
+POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-extension`），并在运行前通过 CDP 打开 Extension 详情页开启 Allow User Scripts。
