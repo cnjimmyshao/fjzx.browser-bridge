@@ -9,8 +9,8 @@ import {
   mergeCookieSets,
   normalizeScope,
   normalizeTargetUrl,
+  originMatchPattern,
   resolvePartitionKey,
-  siteMatchPattern,
 } from './request-context.js';
 
 /**
@@ -175,25 +175,33 @@ export function createRequestContextSource(options = {}) {
   }
 
   /**
-   * Does the extension have the host access this target needs?
+   * How much of the target does the extension's host access actually cover?
    *
-   * `chrome.cookies.getAll` filters **silently** and **per cookie**, so two different
-   * questions matter: the target origin (nothing is visible without it) and the
-   * target's site wildcard, without which a matching parent-domain cookie
-   * (`Domain=.example.com` for `app.example.com`) is dropped without a trace. Both
-   * are asked before any read, so a target whose access was withheld is reported
-   * rather than answered with an incomplete set. When the API is not injected the
-   * checks are skipped and the answer says nothing about access.
+   * `chrome.cookies.getAll` filters **silently** and **per cookie**, so an incomplete
+   * answer is indistinguishable from "this URL has no cookies". Two questions settle
+   * what can be claimed:
+   *
+   * 1. Is the blanket grant (`<all_urls>`, what the manifest declares) still intact?
+   *    Then nothing can have been filtered, and the set is complete — `'all'`.
+   * 2. Otherwise, is at least the target origin covered (pattern without its port —
+   *    match patterns have no port component)? Then the answer is what *this* origin
+   *    can see, and a parent-domain cookie may have been dropped: `'origin'`. If even
+   *    that is not covered, nothing is visible and the request is refused.
+   *
+   * Guessing the registrable domain to ask a narrower question is deliberately not
+   * done: without a public suffix list the guess is wrong for `co.uk` or `github.io`,
+   * which would reject valid targets.
    */
-  async function hasHostAccess(origin, pattern) {
+  async function readHostAccess(targetUrl) {
     const { permissions } = resolveApis();
-    if (typeof permissions?.contains !== 'function') return { ok: true, verified: false };
-    const origins = pattern === undefined || pattern === `${origin}/*` ? [`${origin}/*`] : [`${origin}/*`, pattern];
+    if (typeof permissions?.contains !== 'function') return { ok: true, coverage: 'unknown' };
     try {
-      const granted = await permissions.contains({ origins });
-      return { ok: granted === true, verified: true, origins };
+      if (await permissions.contains({ origins: ['<all_urls>'] })) return { ok: true, coverage: 'all' };
+      const pattern = originMatchPattern(targetUrl);
+      if (await permissions.contains({ origins: [pattern] })) return { ok: true, coverage: 'origin' };
+      return { ok: false, coverage: 'none', pattern };
     } catch (error) {
-      return { ok: false, verified: true, origins, kind: describeErrorKind(error) };
+      return { ok: false, coverage: 'none', kind: describeErrorKind(error) };
     }
   }
 
@@ -260,14 +268,14 @@ export function createRequestContextSource(options = {}) {
     if (!partition.ok) return fail(CONTEXT_ERROR_CODES.INVALID_PARTITION, partition.reason);
 
     // Access is per cookie, not per origin: the work tab being scriptable says
-    // nothing about the target, and the target origin being covered says nothing
-    // about the parent-domain cookies it can also carry.
-    const targetOrigin = new URL(target.url).origin;
-    const access = await hasHostAccess(targetOrigin, siteMatchPattern(target.url));
+    // nothing about the target. A target nothing is visible for is refused; a target
+    // covered only by a narrower grant is answered and *marked*, because only a public
+    // suffix list could tell whether a parent-domain cookie was filtered out.
+    const access = await readHostAccess(target.url);
     if (!access.ok) {
       return fail(
         CONTEXT_ERROR_CODES.CONTEXT_FAILED,
-        `扩展对目标站点没有访问权限（${access.origins.join(' + ')}），无法保证 cookie 集合完整${access.kind === undefined ? '。' : `（${access.kind}）`}`,
+        `扩展对目标站点没有访问权限（${new URL(target.url).origin}），无法保证 cookie 集合完整${access.kind === undefined ? '。' : `（${access.kind}）`}`,
       );
     }
 
@@ -316,6 +324,7 @@ export function createRequestContextSource(options = {}) {
       // the API already returned Chrome's own order.
       duplicateCookieNames: findAmbiguousCookieNames({ unpartitioned, partitioned }),
       exactPartitionSelection: partition.partitionKey === null || ancestorBit,
+      hostAccessCoverage: access.coverage,
       userAgent: pageFacts.userAgent,
       userAgentSource: USER_AGENT_SOURCES.PAGE,
       observedAt: new Date().toISOString(),

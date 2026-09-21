@@ -16,8 +16,8 @@ import {
   normalizeScope,
   normalizeTargetUrl,
   normalizeTopLevelSite,
+  originMatchPattern,
   resolvePartitionKey,
-  siteMatchPattern,
 } from '../src/lib/request-context.js';
 import { USER_AGENT_SOURCES, createRequestContextSource, supportsAncestorBit } from '../src/lib/request-context-source.js';
 import { parseServiceMessage } from '../src/lib/protocol.js';
@@ -746,10 +746,12 @@ test('withheld access to a cross-origin target is reported, not answered with an
   assert.equal(refused.ok, false);
   assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
   assert.match(refused.message, /没有访问权限/);
-  assert.deepEqual(denied.calls.contains, [['https://cdn.test/*', '*://*.cdn.test/*']]);
+  // The blanket grant is asked first, then the target's own origin (no port).
+  assert.deepEqual(denied.calls.contains, [['<all_urls>'], ['https://cdn.test/*']]);
   assert.deepEqual(denied.calls.getAll, [], '越权时不应再读 cookie');
 
-  // Granted access asks the same questions and proceeds.
+  // The normal case: the manifest's blanket grant is intact, so nothing can have
+  // been filtered per cookie and the set is complete.
   const granted = createStubChrome({ cookies: [{ name: 'sid', value: 's', path: '/' }] });
   const allowed = await createSource(granted).read({
     tabId: 1,
@@ -757,54 +759,54 @@ test('withheld access to a cross-origin target is reported, not answered with an
     scope: TARGET_SCOPES.TARGET_ONLY,
   });
   assert.equal(allowed.ok, true);
-  assert.deepEqual(granted.calls.contains, [['https://cdn.test/*', '*://*.cdn.test/*']]);
+  assert.deepEqual(granted.calls.contains, [['<all_urls>']], '整块授权还在时不必再问别的');
+  assert.equal(allowed.context.hostAccessCoverage, 'all');
 
-  // Without the API the check is skipped rather than guessed, and the answer is
-  // still produced (documented: the result says nothing about access).
+  // Without the API the check is skipped rather than guessed, and the answer says so.
   const noApi = createStubChrome({ withPermissionsApi: false });
   const skipped = await createSource(noApi).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
   assert.equal(skipped.ok, true);
+  assert.equal(skipped.context.hostAccessCoverage, 'unknown');
 });
 
-test('access to the target origin alone is not enough for a parent-domain cookie', async () => {
-  // Host permissions are checked per cookie: with `app.example.com` allowed but the
-  // site wildcard not, a `Domain=.example.com` cookie matching the target is dropped
-  // without a trace, so an "ok" here would be a completeness claim Bridge cannot back.
+test('a narrower grant still answers, but marks the set as origin-only', async () => {
+  // Site access restricted to the target origin: cookies whose Domain is a parent
+  // domain may have been filtered out, and only a public suffix list could tell
+  // whether one existed. Refusing a valid target would be wrong for `co.uk`-style
+  // hosts, so the answer carries what could be established.
+  const pageFacts = { userAgent: 'PageUA/1.0', documentReferrer: '', referrerPolicy: null, pageUrl: 'https://app.example.com/feed' };
   const stub = createStubChrome({
     cookies: [{ name: 'sid', value: 's', path: '/' }],
     grantedOrigins: ['https://app.example.com/*'],
     tabUrl: 'https://app.example.com/feed',
-  });
-  const refused = await createSource(stub).read({ tabId: 1, targetUrl: 'https://app.example.com/media/1' });
-
-  assert.equal(refused.ok, false);
-  assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
-  assert.match(refused.message, /没有访问权限/);
-  assert.deepEqual(stub.calls.contains, [['https://app.example.com/*', '*://*.example.com/*']]);
-  assert.deepEqual(stub.calls.getAll, []);
-
-  // With the site covered, the same request goes through.
-  const pageFacts = { userAgent: 'PageUA/1.0', documentReferrer: '', referrerPolicy: null, pageUrl: 'https://app.example.com/feed' };
-  const covered = createStubChrome({
-    cookies: [{ name: 'sid', value: 's', path: '/' }],
-    grantedOrigins: ['https://app.example.com/*', '*://*.example.com/*'],
-    tabUrl: 'https://app.example.com/feed',
     pageFacts,
   });
-  const allowed = await createSource(covered).read({ tabId: 1, targetUrl: 'https://app.example.com/media/1' });
-  assert.equal(allowed.ok, true);
-  assert.equal(allowed.context.cookieCount, 1);
+  const outcome = await createSource(stub).read({ tabId: 1, targetUrl: 'https://app.example.com/media/1' });
+
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.context.hostAccessCoverage, 'origin');
+  assert.deepEqual(stub.calls.contains, [['<all_urls>'], ['https://app.example.com/*']]);
+
+  // The same narrow grant, but for a different origin: nothing is visible, so the
+  // request is refused instead of answered with an empty header.
+  const elsewhere = createStubChrome({ grantedOrigins: ['https://other.test/*'] });
+  const refused = await createSource(elsewhere).read({
+    tabId: 1,
+    targetUrl: 'https://app.example.com/media/1',
+    scope: TARGET_SCOPES.TARGET_ONLY,
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+  assert.deepEqual(elsewhere.calls.getAll, []);
 });
 
-test('siteMatchPattern covers the domains a URL can carry', () => {
-  // A subdomain target can carry a cookie for the parent domain, which the wildcard
-  // asks about; `*.example.com` also covers the bare domain.
-  assert.equal(siteMatchPattern('https://app.example.com/media/1?sign=x'), '*://*.example.com/*');
-  assert.equal(siteMatchPattern('https://example.com/x'), '*://*.example.com/*');
-  // IP literals and single-label hosts have no parent domain to cover.
-  assert.equal(siteMatchPattern('http://127.0.0.1:8080/x'), '*://127.0.0.1/*');
-  assert.equal(siteMatchPattern('http://localhost:8080/x'), '*://localhost/*');
-  assert.equal(siteMatchPattern('http://[::1]:8080/x'), '*://::1/*'.replace('::1', '[::1]'));
+test('originMatchPattern drops the port, which match patterns do not support', () => {
+  // `https://example.com:8443/*` is malformed and `permissions.contains()` rejects
+  // it, which would turn every request for a non-default port into "no access".
+  assert.equal(originMatchPattern('https://example.com:8443/media/1?sign=x'), 'https://example.com/*');
+  assert.equal(originMatchPattern('http://127.0.0.1:8080/x'), 'http://127.0.0.1/*');
+  assert.equal(originMatchPattern('https://app.example.com/x'), 'https://app.example.com/*');
+  assert.equal(originMatchPattern('http://localhost:3000/x'), 'http://localhost/*');
 });
 
 test('an unscriptable page is an error, not a context with the worker user agent', async () => {

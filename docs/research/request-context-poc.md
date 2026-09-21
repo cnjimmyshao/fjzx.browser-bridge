@@ -245,6 +245,7 @@ cookie: sid=…; theme=…; strict=…
     "httpOnlyCookieCount": 1,
     "partitionedCookieCount": 0,
     "exactPartitionSelection": true,
+    "hostAccessCoverage": "all",
     "duplicateCookieNames": [],
     "cookies": [
       { "name": "sid", "domain": "cdn.example.test", "path": "/", "secure": true,
@@ -267,6 +268,16 @@ cookie: sid=…; theme=…; strict=…
 `duplicateCookieNames` 非空表示 `cookieHeader` 里的同名并列**跨了两次查询**（非分区查询与分区查询），因此顺序由 Bridge 决定、而不是 Chrome 决定的。分区与非分区是两份 cookie，可以同名同 path，浏览器会把两份都发；`chrome.cookies` 不暴露创建时间，合并两个响应时相对顺序就丢了。**同一次查询内部**的顺序是 API 按浏览器发送顺序返回的（实测），稳定排序会保留，所以那类重名（例如两个域上都叫 `sid`）**不会**进这个字段；path 长度不同的重名也不会（长度本身就决定了顺序）。另外，Chrome 可能持有形如 `=value` 的**无名 cookie**：它同样会被保留在 `cookieHeader` 与元数据里，不会被静默丢掉。
 
 `exactPartitionSelection` 为 `false` 表示**浏览器版本低于 130**：`hasCrossSiteAncestor` 这个字段还不存在，发过去会让 `getAll` 拒绝整条查询（连"根本没有分区 cookie 的目标"也会一起失败）。因此实现按版本降级——不加这一位、只按顶层站点取分区，并把这个事实显式写在响应里。manifest **没有**为此抬高 `minimum_chrome_version`：V1 本身的底线是 `userScripts`（Chrome 120），不该被一个实验能力连坐。
+
+`hostAccessCoverage` 说明**这次回答在权限方面能承诺到什么程度**——host 权限是**按每个 cookie** 过滤的，所以"没有 cookie"与"看不到 cookie"从结果上分不开：
+
+| 值 | 含义 |
+| --- | --- |
+| `all` | manifest 声明的整块授权（`<all_urls>`）仍然有效，因此不可能有任何 cookie 被逐条过滤掉，集合是完整的 |
+| `origin` | 授权被收窄，只覆盖到目标 origin；**父域 cookie（`Domain=.example.com` 之于 `app.example.com`）可能已被静默丢弃**，此时集合是"可见的那些"，不宣称完整 |
+| `unknown` | 问不到权限 API（未注入），不对覆盖范围作任何声明 |
+
+之所以不干脆拒绝 `origin` 这种情况：判断"是否存在父域 cookie"需要公共后缀表，而 Bridge 不携带 PSL、用"末两段标签"猜会在 `co.uk`、`github.io` 这类多段后缀上判错（`app.example.co.uk` 会被猜成 `*://*.co.uk/*`）。另外 match pattern **不支持端口**，所以模式必须由 scheme + hostname 组成（`https://example.com/*`），带上 `:8443` 会被 API 直接拒绝。目标 origin 完全不在授权范围内时才是硬拒绝（`CONTEXT_FAILED`）。
 
 失败（`ok:false`）沿用 V1 `RESULT.error` 的形状：`{ code, message }`。code 集合（`CONTEXT_ERROR_CODES`，与 V1 的 `ERROR_CODES` **分开**，不动后者）：
 

@@ -220,23 +220,24 @@ export function isSameSite(a, b) {
 }
 
 /**
- * The match pattern that covers every cookie domain a URL can carry.
+ * The match pattern for a URL's **origin**, without its port.
  *
- * Host permissions are checked **per cookie**, not per query: a `Domain=.example.com`
- * cookie matching `app.example.com` is dropped unless the extension also has access
- * to the parent domain. Asking only about the target origin would therefore accept a
- * set that is silently missing those cookies, so callers check this pattern too. For
- * a subdomain it is the site wildcard (`*://*.example.com/*`, which also covers the
- * bare domain); for an IP literal or a single-label host there is no parent domain to
- * cover.
+ * Chrome match patterns have no port component, so `https://example.com:8443/*` is
+ * malformed and `permissions.contains()` rejects it. The sensible pattern is
+ * `https://example.com/*`.
+ *
+ * Host permissions are checked per *cookie*, so this pattern alone cannot prove that
+ * a parent-domain cookie (`Domain=.example.com` matching `app.example.com`) is
+ * visible. Deciding that in general needs a public suffix list, which Bridge does not
+ * carry and which a "last two labels" guess gets wrong for `co.uk`, `github.io` and
+ * friends — so the question is asked as "is the blanket grant still in place?"
+ * instead, and anything narrower is reported as narrower rather than refused.
  *
  * @param {string} url
  */
-export function siteMatchPattern(url) {
-  const { hostname } = new URL(url);
-  const isIpLiteral = hostname.includes(':') || /^\d+(\.\d+){3}$/.test(hostname);
-  if (isIpLiteral || !hostname.includes('.')) return `*://${hostname}/*`;
-  return `*://*.${siteHost(hostname)}/*`;
+export function originMatchPattern(url) {
+  const { protocol, hostname } = new URL(url);
+  return `${protocol}//${hostname}/*`;
 }
 
 /**
@@ -446,6 +447,7 @@ export function describeErrorKind(error) {
  *   referrerPolicy?: string | null,
  *   duplicateCookieNames?: string[],
  *   exactPartitionSelection?: boolean,
+ *   hostAccessCoverage?: 'all' | 'origin' | 'unknown',
  *   serviceWorkerUserAgent?: string | null,
  * }} input
  */
@@ -469,6 +471,11 @@ export function buildRequestContext(input) {
     // partition was chosen by top-level site alone: the set may contain cookies from
     // both partitions instead of exactly one.
     exactPartitionSelection: input.exactPartitionSelection !== false,
+    // 'all'  — the blanket host grant is intact, so per-cookie filtering removed nothing;
+    // 'origin' — only the target origin is covered, so a parent-domain cookie may have
+    //            been filtered out and the set is "what is visible", not proven complete;
+    // 'unknown' — the permissions API could not be asked.
+    hostAccessCoverage: input.hostAccessCoverage ?? 'unknown',
     // Non-empty means the header carries the same name twice in a way Bridge cannot
     // order (the merge of two queries); `cookies` says which entry belongs to which
     // partition. Computed by the caller, which is where the two query results exist.
