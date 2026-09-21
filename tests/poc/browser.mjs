@@ -62,6 +62,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Every DevTools HTTP call is bounded by this. */
 const HTTP_TIMEOUT_MS = 5000;
 
+/** The WebSocket upgrade to a target is local, so it should be near-instant. */
+const HANDSHAKE_TIMEOUT_MS = 5000;
+
 /**
  * A bounded DevTools HTTP request.
  *
@@ -77,8 +80,35 @@ function cdpFetch(url, init = {}, timeoutMs = HTTP_TIMEOUT_MS) {
 async function connect(webSocketDebuggerUrl) {
   const socket = new WebSocket(webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
-    socket.onopen = resolve;
-    socket.onerror = () => reject(new Error(`无法连接 CDP：${webSocketDebuggerUrl}`));
+    // Bounded handshake. A target that accepts TCP but stalls before the upgrade
+    // fires neither `open` nor `error`; the per-command timeout in send() cannot
+    // help, because it only starts once this promise has settled. Combined with the
+    // POC's own timers, a wedged target would hang the entire run.
+    let settled = false;
+    const timer = setTimeout(() => {
+      // Claim the outcome before closing: closing fires `error` synchronously, and
+      // the timeout is the more useful explanation of what happened.
+      settled = true;
+      try {
+        socket.close();
+      } catch {
+        // already gone
+      }
+      reject(new Error(`连接 CDP 超时：${webSocketDebuggerUrl}`));
+    }, HANDSHAKE_TIMEOUT_MS);
+
+    socket.onopen = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    socket.onerror = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`无法连接 CDP：${webSocketDebuggerUrl}`));
+    };
   });
 
   let nextId = 1;

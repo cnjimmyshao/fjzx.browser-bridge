@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { launchBrowser, openPage } from './poc/browser.mjs';
+import { launchBrowser, evaluate, openPage } from './poc/browser.mjs';
 import { startTestService } from './poc/service.mjs';
 
 /**
@@ -208,6 +208,48 @@ test('openPage 返回新建的 target，而不是已存在的同前缀页面', a
     assert.equal(await openPage(port, 'chrome://extensions/?id=abc'), 'new-target');
   } finally {
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('CDP 只接受 TCP 却不应答升级请求时，握手必须有超时', async () => {
+  // A stalled WebSocket endpoint: it accepts the connection and then says nothing.
+  const stalledSockets = [];
+  const stalled = createTcpServer((socket) => stalledSockets.push(socket));
+  await new Promise((resolve) => stalled.listen(0, '127.0.0.1', resolve));
+  const stalledPort = stalled.address().port;
+
+  const devtools = createServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(
+      JSON.stringify([
+        {
+          id: 'stalled-target',
+          type: 'page',
+          url: 'http://127.0.0.1/',
+          webSocketDebuggerUrl: `ws://127.0.0.1:${stalledPort}/devtools/page/stalled-target`,
+        },
+      ]),
+    );
+  });
+  await new Promise((resolve) => devtools.listen(0, '127.0.0.1', resolve));
+  const devtoolsPort = devtools.address().port;
+
+  try {
+    // The race is the test's own guard: without the handshake timeout this never
+    // settles, and the race turns that into a failure instead of a hung suite.
+    await assert.rejects(
+      Promise.race([
+        evaluate(devtoolsPort, 'stalled-target', '1 + 1'),
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error('测试守卫：evaluate 在 12s 内没有返回')), 12000),
+        ),
+      ]),
+      /连接 CDP 超时/,
+    );
+  } finally {
+    for (const socket of stalledSockets) socket.destroy();
+    await new Promise((resolve) => stalled.close(resolve));
+    await new Promise((resolve) => devtools.close(resolve));
   }
 });
 
