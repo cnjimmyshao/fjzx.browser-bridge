@@ -287,15 +287,18 @@ test('a replaced tab does not leave a stale binding behind', async () => {
   assert.equal(manager.tabId, 2, '必须指向替换后的 tabId');
 });
 
-test('a replacement that leaves no ordinary tab reports WORK_TAB_CLOSED', async () => {
+test('a replacement whose successor is not an ordinary page is a release, not a closure', async () => {
   const fake = createFakeTabs([web(1, 'https://a.test/')]);
   const manager = createWorkTabManager({ tabs: fake.api });
 
   await manager.refresh('worker-start');
   await fake.replaceTab(browser(2, 'chrome://settings/'), 1);
 
+  // The logical tab was handed to id 2 and is still in the profile; it simply is
+  // no longer an ordinary page, so the binding is released without claiming the
+  // Work Tab was closed.
   assert.equal(manager.tabId, null);
-  assert.equal(manager.reason, WORK_TAB_REASONS.WORK_TAB_CLOSED);
+  assert.equal(manager.reason, WORK_TAB_REASONS.NO_WORK_TAB);
 });
 
 test('an out-of-order query result is discarded', async () => {
@@ -340,7 +343,7 @@ test('a binding restored after worker suspension recognises the closure', async 
   // The worker was suspended with tab 5 bound; Chrome wakes it to deliver the
   // removal, so its in-memory binding is gone and only the persisted id remains.
   const fake = createFakeTabs([]);
-  const binding = createMemoryBinding({ tabId: 5, boundTabWasClosed: false });
+  const binding = createMemoryBinding({ rememberedTabId: 5, boundTabWasClosed: false });
   const manager = createWorkTabManager({ tabs: fake.api, binding });
 
   await fake.emitRemoved(5);
@@ -355,7 +358,7 @@ test('a binding restored after worker suspension recognises the closure', async 
 
 test('a restored closed-flag keeps the reason specific', async () => {
   const fake = createFakeTabs([]);
-  const binding = createMemoryBinding({ tabId: null, boundTabWasClosed: true });
+  const binding = createMemoryBinding({ rememberedTabId: null, boundTabWasClosed: true });
   const manager = createWorkTabManager({ tabs: fake.api, binding });
 
   await manager.refresh('worker-start');
@@ -371,7 +374,7 @@ test('the binding is persisted after each evaluation', async () => {
   await manager.refresh('worker-start');
   await settle();
 
-  assert.deepEqual(binding.writes.at(-1), { tabId: 4, boundTabWasClosed: false });
+  assert.deepEqual(binding.writes.at(-1), { rememberedTabId: 4, boundTabWasClosed: false });
 });
 
 test('a tab that navigated away and is then closed is not a Work Tab closure', async () => {
@@ -397,7 +400,7 @@ test('a closure is derived from the tab list, without depending on event order',
   // The worker wakes because the Work Tab was closed; the removal event and the
   // initial refresh race, and the outcome must not depend on who wins.
   const fake = createFakeTabs([]);
-  const binding = createMemoryBinding({ tabId: 5, boundTabWasClosed: false });
+  const binding = createMemoryBinding({ rememberedTabId: 5, boundTabWasClosed: false });
   const manager = createWorkTabManager({ tabs: fake.api, binding });
 
   await manager.refresh('worker-start');
@@ -422,8 +425,110 @@ test('a failed follow-up query still persists the closure', async () => {
   assert.equal(manager.reason, WORK_TAB_REASONS.WORK_TAB_CLOSED);
   assert.deepEqual(
     binding.writes.at(-1),
-    { tabId: null, boundTabWasClosed: true },
+    { rememberedTabId: null, boundTabWasClosed: true },
     '查询失败也不能让 storage.session 留在旧的已绑定状态',
+  );
+});
+
+test('a failed initial query does not erase the restored binding', async () => {
+  const fake = createFakeTabs([web(5)]);
+  const binding = createMemoryBinding({ rememberedTabId: 5, boundTabWasClosed: false });
+  const manager = createWorkTabManager({ tabs: fake.api, binding });
+  const before = binding.writes.length;
+  fake.failQueries();
+
+  await manager.refresh('worker-start');
+  await settle();
+
+  assert.deepEqual(
+    binding.writes.at(-1),
+    { rememberedTabId: 5, boundTabWasClosed: false },
+    '恢复的绑定是唯一的持久记录，失败的查询不得把它抹掉',
+  );
+  assert.ok(binding.writes.length > before);
+});
+
+test('a tab replacement is never recorded as a closure', async () => {
+  const fake = createFakeTabs([web(1, 'https://a.test/')]);
+  const binding = createMemoryBinding(null);
+  const manager = createWorkTabManager({ tabs: fake.api, binding });
+
+  await manager.refresh('worker-start');
+  // Even when the follow-up query fails, a replacement is not a closure.
+  fake.failQueries();
+  await fake.replaceTab(web(2, 'https://a.test/'), 1);
+  await settle();
+
+  assert.equal(manager.tabId, 2, '身份应转移到新 id');
+  assert.equal(manager.reason, null, '替换不是关闭');
+  assert.equal(binding.writes.at(-1).boundTabWasClosed, false);
+});
+
+test('binding writes are serialized so an older snapshot cannot land last', async () => {
+  const fake = createFakeTabs([web(8, 'https://a.test/')]);
+  const applied = [];
+  let held = null;
+  const binding = {
+    read: async () => null,
+    write(state) {
+      if (held === null) {
+        // Hold the very first write so a later, newer one would overtake it.
+        return new Promise((resolve) => {
+          held = () => {
+            applied.push(state);
+            resolve();
+          };
+        });
+      }
+      applied.push(state);
+      return Promise.resolve();
+    },
+  };
+  const manager = createWorkTabManager({ tabs: fake.api, binding });
+
+  await manager.refresh('worker-start'); // write #1: bound to 8, held
+  await settle();
+  await fake.navigate(8, 'chrome://settings/'); // write #2: released
+  await settle();
+
+  held();
+  await settle();
+
+  assert.deepEqual(
+    applied.at(-1),
+    { rememberedTabId: null, boundTabWasClosed: false },
+    '最后落盘的必须是较新的快照，而不是被追上的旧快照',
+  );
+});
+
+test('navigating away then closing before the query resolves is not a closure', async () => {
+  const fake = createFakeTabs([web(5, 'https://a.test/')], { manual: true });
+  const manager = createWorkTabManager({ tabs: fake.api });
+
+  const initial = manager.refresh('worker-start');
+  await settle();
+  fake.resolveQuery(0, [web(5, 'https://a.test/')]);
+  await initial;
+  assert.equal(manager.tabId, 5);
+
+  // The bound tab navigates away: the binding is released synchronously, while
+  // its own refresh query is still in flight.
+  await fake.emitUpdated(5, { url: 'chrome://settings/' });
+  assert.equal(manager.tabId, null, '导航离开后应立刻释放绑定');
+
+  // It is closed before that query resolves, and the removal's query wins the
+  // revision race.
+  await fake.emitRemoved(5);
+  assert.equal(fake.pendingQueryCount(), 2);
+
+  fake.resolveQuery(1, []);
+  fake.resolveQuery(0, []);
+  await settle();
+
+  assert.equal(
+    manager.reason,
+    WORK_TAB_REASONS.NO_WORK_TAB,
+    '关闭一个早已离开网页的 Tab 不是 Work Tab 关闭',
   );
 });
 

@@ -33,17 +33,22 @@ export const WORK_TAB_REASONS = Object.freeze({
  */
 const CANDIDATE_PROTOCOLS = ['http:', 'https:'];
 
+/** @param {unknown} url */
+function isCandidateUrl(url) {
+  if (typeof url !== 'string') return false;
+  try {
+    return CANDIDATE_PROTOCOLS.includes(new URL(url).protocol);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * @param {{id?: unknown, url?: unknown}} tab
  * @returns {boolean}
  */
 export function isCandidateTab(tab) {
-  if (!tab || typeof tab.id !== 'number' || typeof tab.url !== 'string') return false;
-  try {
-    return CANDIDATE_PROTOCOLS.includes(new URL(tab.url).protocol);
-  } catch {
-    return false;
-  }
+  return Boolean(tab) && typeof tab.id === 'number' && isCandidateUrl(tab.url);
 }
 
 /**
@@ -53,33 +58,37 @@ export function isCandidateTab(tab) {
  * not "pick one", because choosing which of two ordinary tabs is *the* Work Tab
  * would require exactly the site knowledge Bridge must not have.
  *
- * @param {{previouslyBoundTabId?: number | null}} [options] the binding restored
- *   from an earlier worker lifetime, so a closure that happens right after the
- *   worker wakes is still recognised. See `createWorkTabManager`.
+ * `rememberedTabId` is the one piece of durable memory: the last tab Bridge was
+ * driving. `applyTabs` decides closure by asking whether that tab is still in the
+ * profile at all, which makes the answer independent of which lifecycle event
+ * happens to arrive first — including the event that wakes a suspended worker.
+ * The synchronous `note*` methods only cover the cases where the event itself
+ * carries information the next query cannot recover.
+ *
+ * @param {{rememberedTabId?: number | null, boundTabWasClosed?: boolean}} [options]
  */
 export function createWorkTabTracker(options = {}) {
-  const { previouslyBoundTabId = null } = options;
+  const { rememberedTabId: restoredTabId = null, boundTabWasClosed: restoredClosed = false } =
+    options;
 
   let tabId = null;
-  /**
-   * The last tab this tracker bound, or was told it had bound, whether or not it
-   * is still around. `tabs.onRemoved` only carries an id, so recognising that
-   * the Work Tab went away requires remembering the id rather than the tab.
-   */
-  let lastBoundTabId = typeof previouslyBoundTabId === 'number' ? previouslyBoundTabId : null;
-  let reason = WORK_TAB_REASONS.NO_WORK_TAB;
-  /**
-   * Distinguishes "the tab we were bound to was closed" from "there never was
-   * one". It survives until something is successfully bound, so a closure stays
-   * diagnosable while the profile is momentarily empty.
-   */
-  let boundTabWasClosed = false;
+  let rememberedTabId = typeof restoredTabId === 'number' ? restoredTabId : null;
+  let boundTabWasClosed = restoredClosed === true;
+  let reason = boundTabWasClosed
+    ? WORK_TAB_REASONS.WORK_TAB_CLOSED
+    : WORK_TAB_REASONS.NO_WORK_TAB;
 
   function bind(candidateId) {
     tabId = candidateId;
-    lastBoundTabId = candidateId;
+    rememberedTabId = candidateId;
     boundTabWasClosed = false;
     reason = null;
+  }
+
+  function release(newReason) {
+    tabId = null;
+    rememberedTabId = null;
+    reason = newReason;
   }
 
   return {
@@ -93,20 +102,20 @@ export function createWorkTabTracker(options = {}) {
     get isBound() {
       return tabId !== null;
     },
-    /** Snapshot for the manager to persist across worker suspension. */
+    /** The durable memory, for the manager to persist across suspension. */
     get persisted() {
-      return { tabId, boundTabWasClosed };
+      return { rememberedTabId, boundTabWasClosed };
     },
 
     /**
      * Re-evaluate against the current tab list.
      *
-     * The result is a pure function of the list: 0, 1 or N candidates map to
-     * NO_WORK_TAB, a binding, or MULTIPLE_TABS. There is deliberately no
-     * hysteresis that would let a previous binding outlive an ambiguous profile —
-     * once two ordinary tabs exist, Bridge genuinely cannot tell which one the
-     * Service is driving, and saying so is more useful than silently continuing
-     * with a stale guess.
+     * The result is a pure function of the list plus the remembered tab: 0, 1 or
+     * N candidates map to NO_WORK_TAB, a binding, or MULTIPLE_TABS. There is
+     * deliberately no hysteresis that would let a previous binding outlive an
+     * ambiguous profile — once two ordinary tabs exist, Bridge genuinely cannot
+     * tell which one the Service is driving, and saying so is more useful than
+     * silently continuing with a stale guess.
      *
      * Navigation inside the bound tab needs no special case: the tab is still the
      * single candidate, so the same tabId is bound again.
@@ -118,9 +127,8 @@ export function createWorkTabTracker(options = {}) {
         (tab) => tab && typeof tab.id === 'number',
       );
       const candidates = all.filter(isCandidateTab);
-      const remembered = lastBoundTabId;
       const rememberedStillPresent =
-        remembered !== null && all.some((tab) => tab.id === remembered);
+        rememberedTabId !== null && all.some((tab) => tab.id === rememberedTabId);
 
       if (candidates.length === 1) {
         bind(candidates[0].id);
@@ -129,15 +137,15 @@ export function createWorkTabTracker(options = {}) {
 
       tabId = null;
 
-      // A tab that has left the profile entirely is a closure. Deriving this from
-      // the list rather than from matching a removal event makes it independent of
-      // event ordering — including the wake-up that Chrome performs to deliver
-      // the removal — and it distinguishes a closure from a tab that merely
-      // navigated away, which is still present but no longer an ordinary page.
-      if (remembered !== null && !rememberedStillPresent) {
+      // A remembered tab that has left the profile entirely was closed. Deriving
+      // this from the list rather than from a removal event is what makes the
+      // answer independent of event ordering, and it distinguishes a closure from
+      // a tab that merely navigated away — still present, just no longer an
+      // ordinary page.
+      if (rememberedTabId !== null && !rememberedStillPresent) {
         boundTabWasClosed = true;
       }
-      lastBoundTabId = null;
+      rememberedTabId = null;
 
       if (candidates.length === 0) {
         reason = boundTabWasClosed
@@ -150,25 +158,49 @@ export function createWorkTabTracker(options = {}) {
     },
 
     /**
-     * Record that a tab went away. Closing an unrelated tab changes nothing;
-     * closing the tab we bound — now or in an earlier worker lifetime — does.
+     * A tab navigated. Called synchronously from `tabs.onUpdated`, because only
+     * the event carries the new URL: once the navigation is done the query can no
+     * longer tell whether the tab was ever a candidate.
      *
-     * This matters even though `applyTabs` can derive the same conclusion, because
-     * the removal must survive a follow-up query that fails.
+     * @param {number} navigatedTabId
+     * @param {unknown} url
+     */
+    noteNavigated(navigatedTabId, url) {
+      if (navigatedTabId !== tabId && navigatedTabId !== rememberedTabId) return;
+      if (isCandidateUrl(url)) return;
+      // Still in the profile, just no longer an ordinary page: the binding is
+      // released, but this is not the Work Tab being closed.
+      release(WORK_TAB_REASONS.NO_WORK_TAB);
+    },
+
+    /**
+     * A tab was closed. Called synchronously from `tabs.onRemoved`.
+     *
+     * Only a tab that is bound *right now* proves a closure. A remembered-but-
+     * unbound id is left to `applyTabs`, which can tell a closure from a
+     * navigation by looking at whether the tab is still there.
      *
      * @param {number} removedTabId
      */
-    handleTabRemoved(removedTabId) {
-      if (removedTabId !== tabId && removedTabId !== lastBoundTabId) return;
+    noteRemoved(removedTabId) {
+      if (removedTabId !== tabId) return;
       tabId = null;
-      lastBoundTabId = null;
+      rememberedTabId = null;
       boundTabWasClosed = true;
       reason = WORK_TAB_REASONS.WORK_TAB_CLOSED;
     },
 
-    /** Restore the closed-flag that a previous worker lifetime persisted. */
-    restoreClosedFlag(wasClosed) {
-      if (wasClosed === true) boundTabWasClosed = true;
+    /**
+     * A tab was replaced by another tab id (prerendering or Instant). The logical
+     * tab was not closed, so its identity is transferred rather than released.
+     *
+     * @param {number} addedTabId
+     * @param {number} removedTabId
+     */
+    noteReplaced(addedTabId, removedTabId) {
+      if (removedTabId !== tabId && removedTabId !== rememberedTabId) return;
+      if (tabId === removedTabId) tabId = addedTabId;
+      rememberedTabId = addedTabId;
     },
   };
 }
@@ -189,8 +221,8 @@ export function createWorkTabTracker(options = {}) {
  *     onReplaced: object,
  *   },
  *   binding?: {
- *     read: () => Promise<{tabId?: number | null, boundTabWasClosed?: boolean} | null>,
- *     write: (state: {tabId: number | null, boundTabWasClosed: boolean}) => Promise<void>,
+ *     read: () => Promise<{rememberedTabId?: number | null, boundTabWasClosed?: boolean} | null>,
+ *     write: (state: {rememberedTabId: number | null, boundTabWasClosed: boolean}) => Promise<void>,
  *   },
  *   onChange?: (state: {tabId: number | null, reason: string | null}, trigger: string) => void,
  *   logger?: {info?: Function, warn?: Function},
@@ -215,9 +247,11 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
    * corrected, and nothing would be guaranteed to fix it again.
    */
   let queryRevision = 0;
+  /** Writes are chained so an older snapshot can never land after a newer one. */
+  let persistChain = Promise.resolve();
 
   /**
-   * Read the binding a previous worker lifetime left behind. Manifest V3 may
+   * Read the memory a previous worker lifetime left behind. Manifest V3 may
    * suspend this worker while the Work Tab is still open, so without this the
    * closure of that tab would look like "there was never a tab".
    */
@@ -230,16 +264,20 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
         logger.warn?.('[bridge] failed to restore the previous work tab binding', error);
       }
     }
-    tracker = createWorkTabTracker({ previouslyBoundTabId: previous?.tabId ?? null });
-    tracker.restoreClosedFlag(previous?.boundTabWasClosed);
+    tracker = createWorkTabTracker({
+      rememberedTabId: previous?.rememberedTabId ?? null,
+      boundTabWasClosed: previous?.boundTabWasClosed ?? false,
+    });
   })();
 
   function persist() {
     if (!binding || typeof binding.write !== 'function' || !tracker) return;
     const state = tracker.persisted;
-    Promise.resolve(binding.write(state)).catch((error) => {
-      logger.warn?.('[bridge] failed to persist the work tab binding', error);
-    });
+    persistChain = persistChain
+      .then(() => binding.write(state))
+      .catch((error) => {
+        logger.warn?.('[bridge] failed to persist the work tab binding', error);
+      });
   }
 
   function publish(trigger) {
@@ -270,10 +308,8 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
       found = await tabs.query({});
     } catch (error) {
       logger.warn?.('[bridge] failed to list tabs', error);
-      // The tracker may already have changed — a tab removal is recorded before
-      // this query runs — so the current state is published either way, and
-      // persisted too: leaving the previous binding on record would make a later
-      // wake-up report NO_WORK_TAB and lose the closure entirely.
+      // The current state is published and persisted either way: it may already
+      // have been changed synchronously by the event that triggered this refresh.
       publish(trigger);
       persist();
       return;
@@ -289,7 +325,7 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
     persist();
   }
 
-  /** Run `work` once the restored binding is in place, in event order. */
+  /** Run `work` once the restored memory is in place, in event order. */
   function afterSeed(work) {
     void (async () => {
       await seeded;
@@ -302,10 +338,8 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
   });
 
   tabs.onRemoved.addListener((removedTabId) => {
-    // Record the closure before re-querying, so an emptied profile still reports
-    // WORK_TAB_CLOSED rather than the generic NO_WORK_TAB.
     afterSeed(() => {
-      tracker.handleTabRemoved(removedTabId);
+      tracker.noteRemoved(removedTabId);
       void refresh('tab-removed');
     });
   });
@@ -313,15 +347,18 @@ export function createWorkTabManager({ tabs, binding, onChange, logger = {} }) {
   tabs.onUpdated.addListener((_tabId, changeInfo) => {
     // Only a URL change can alter candidacy, so status churn is ignored.
     if (!changeInfo || changeInfo.url === undefined) return;
-    void refresh('tab-updated');
+    afterSeed(() => {
+      tracker.noteNavigated(_tabId, changeInfo.url);
+      void refresh('tab-updated');
+    });
   });
 
-  tabs.onReplaced.addListener((_addedTabId, removedTabId) => {
-    // Prerendering hands a tab's identity to a new tab id. Chrome fires this
-    // instead of the create/remove pair, so without listening the manager would
-    // keep pointing at an id that no longer exists.
+  tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+    // Prerendering hands a tab's identity to a new id. Chrome fires this instead
+    // of the create/remove pair, so the logical tab is not a closure.
     afterSeed(() => {
-      tracker.handleTabRemoved(removedTabId);
+      tracker.noteReplaced(addedTabId, removedTabId);
+      persist();
       void refresh('tab-replaced');
     });
   });
