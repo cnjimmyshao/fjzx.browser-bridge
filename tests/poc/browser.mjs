@@ -19,18 +19,25 @@ import { tmpdir } from 'node:os';
 
 const DEBUG_PORT = 9222;
 
-/** Locations worth trying when BROWSER_EXECUTABLE is not set. */
+/**
+ * Locations worth trying when BROWSER_EXECUTABLE is not set.
+ *
+ * Only builds that actually honour `--load-extension` are listed. Edge is
+ * deliberately absent even though it is installed on essentially every Windows
+ * machine: it ignores the flag, so picking it automatically would start a browser
+ * without the extension and surface as a confusing "extension not found" much
+ * later. An explicit `--browser` path is always honoured, so Edge can still be
+ * passed on purpose.
+ */
 function browserCandidates() {
   const local = process.env.LOCALAPPDATA ?? '';
   const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files';
-  const programFilesX86 = process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)';
 
   return [
     process.env.BROWSER_EXECUTABLE,
     join(local, 'chrome-for-testing', 'chrome-win64', 'chrome.exe'),
     join(programFiles, 'Chromium', 'Application', 'chrome.exe'),
     join(programFiles, 'Google', 'Chrome for Testing', 'Application', 'chrome.exe'),
-    join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
   ].filter(Boolean);
 }
 
@@ -62,6 +69,20 @@ async function connect(webSocketDebuggerUrl) {
 
   let nextId = 1;
   const pending = new Map();
+
+  /**
+   * Fail every in-flight command.
+   *
+   * A `send()` whose socket dies first would otherwise never settle, and since the
+   * POC keeps HTTP servers and a polling interval alive, one dead target would hang
+   * the whole run instead of failing a scenario.
+   */
+  function failPending(reason) {
+    const entries = [...pending.values()];
+    pending.clear();
+    for (const entry of entries) entry.reject(reason);
+  }
+
   socket.onmessage = (event) => {
     const message = JSON.parse(event.data);
     const entry = pending.get(message.id);
@@ -70,6 +91,8 @@ async function connect(webSocketDebuggerUrl) {
     if (message.error) entry.reject(new Error(message.error.message));
     else entry.resolve(message.result);
   };
+  socket.onclose = () => failPending(new Error('CDP 连接已关闭'));
+  socket.onerror = () => failPending(new Error('CDP 连接出错'));
 
   return {
     send(method, params = {}) {
@@ -80,6 +103,7 @@ async function connect(webSocketDebuggerUrl) {
       });
     },
     close() {
+      failPending(new Error('CDP 客户端已关闭'));
       try {
         socket.close();
       } catch {
@@ -191,7 +215,17 @@ export async function launchBrowser(options) {
 
 /** @param {number} port @param {string} name */
 export async function findExtensionId(port, name) {
-  const targetId = await openPage(port, 'chrome://extensions');
+  let targetId;
+  try {
+    targetId = await openPage(port, 'chrome://extensions');
+  } catch (error) {
+    // The usual cause is a browser that ignores `--load-extension`: it starts
+    // happily, so the failure only shows up here, as a page that never opens.
+    throw new Error(
+      `${error.message}。若这里用的是品牌版 Chrome 142+ 或 Edge，它们会忽略 --load-extension，` +
+        '扩展从未被加载；请改用 Chrome for Testing。',
+    );
+  }
   await sleep(1200);
   const found = await evaluate(
     port,

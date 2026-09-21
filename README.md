@@ -150,9 +150,17 @@ npm run poc         # 等价于 node tests/poc/run-poc.mjs
 1. 打开 `chrome://extensions`，启用「开发者模式」。
 2. 「加载已解压的扩展程序」→ 选择本仓库的 `src/`。
 3. 在该扩展的详情页打开 **Allow User Scripts**（Chrome 138+ 必需，否则 Bridge 报 `NOT_READY / USER_SCRIPTS_UNAVAILABLE`）。
-4. 点击「扩展程序选项」，填写测试 Service 的地址并保存。
-5. 在同一个 Profile 里只留**一个普通网页标签页**作为 Work Tab。
-6. 运行 `node tests/poc/service.mjs --interactive` 之类的自定义脚本，或用你想用的任何 WebSocket 客户端连上去发 `EXECUTE`。
+4. 另开一个终端启动测试 Service，它会把自己的地址打印出来：
+
+   ```powershell
+   node tests/poc/service.mjs --interactive   # 默认 ws://127.0.0.1:8787，可用 --port 改
+   ```
+
+5. 点击「扩展程序选项」，填写第 4 步打印出来的地址并保存。
+6. 在同一个 Profile 里只留**一个普通网页标签页**作为 Work Tab。
+7. 回到第 4 步的终端发消息：直接输入一段脚本函数体（例如 `return document.title`）回车，就会看到 Bridge 回传的 `RESULT`。`:status` 发 `GET_STATUS`，`:input <json>` 设置后续 `EXECUTE` 的 `input`，`:quit` 退出。也可以改用自己的任何 WebSocket 客户端。
+
+不加 `--interactive` 时它只打印往来帧，适合与别的客户端配合排查。
 
 > POC 全程只使用本机地址与本地测试页面，**不依赖任何第三方站点**。
 

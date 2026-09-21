@@ -71,23 +71,13 @@ console.log('Browser Bridge V1 — end-to-end POC\n');
 console.log(`  browser   ${exe}`);
 console.log(`  extension ${EXTENSION_ROOT}\n`);
 
-const pages = await startTestPageServer();
-let service = await startTestService();
-const browser = await launchBrowser({
-  exe,
-  extensionPath: EXTENSION_ROOT,
-  port: options.port,
-  headless: !options.headed,
-});
-console.log(`  service   ${service.url}`);
-console.log(`  page      ${pages.urlFor('/')}\n`);
-
-const extensionId = await findExtensionId(options.port, EXTENSION_NAME);
-// Read the options path from the manifest rather than assuming it: a harness that
-// guesses the extension's own layout is a harness that breaks silently.
-const manifest = JSON.parse(readFileSync(join(EXTENSION_ROOT, 'manifest.json'), 'utf8'));
-const optionsUrl = `chrome-extension://${extensionId}/${manifest.options_ui.page}`;
-await openPage(options.port, pages.urlFor('/'));
+// Everything that needs cleaning up is declared before the try: launchBrowser
+// spawns a *detached* browser, so a failure during setup would otherwise leave an
+// orphaned Chrome holding the profile and the POC would never report why.
+let pages = null;
+let service = null;
+let browser = null;
+let optionsUrl = null;
 
 /** Saves the Service URL through the real settings page. */
 async function configureServiceUrl(url) {
@@ -123,6 +113,24 @@ async function configureServiceUrl(url) {
 const soleWorkTab = async () => (await httpPages(options.port))[0]?.id;
 
 try {
+  pages = await startTestPageServer();
+  service = await startTestService();
+  browser = await launchBrowser({
+    exe,
+    extensionPath: EXTENSION_ROOT,
+    port: options.port,
+    headless: !options.headed,
+  });
+  console.log(`  service   ${service.url}`);
+  console.log(`  page      ${pages.urlFor('/')}\n`);
+
+  const extensionId = await findExtensionId(options.port, EXTENSION_NAME);
+  // Read the options path from the manifest rather than assuming it: a harness that
+  // guesses the extension's own layout is a harness that breaks silently.
+  const manifest = JSON.parse(readFileSync(join(EXTENSION_ROOT, 'manifest.json'), 'utf8'));
+  optionsUrl = `chrome-extension://${extensionId}/${manifest.options_ui.page}`;
+  await openPage(options.port, pages.urlFor('/'));
+
   await configureServiceUrl(service.url);
   await service.waitForBridge(20000);
 
@@ -372,15 +380,20 @@ try {
     );
     assert.equal(rejected.find((m) => m.jobId === 'junk-1').ok, false);
   });
+} catch (error) {
+  // Scenarios swallow their own failures, so anything reaching here is setup or an
+  // assertion between scenarios. It has to fail the run, not exit 0 with a summary
+  // that only counted the scenarios that happened to run.
+  results.push({ name: '前置准备 / 场景编排', ok: false, error: error.message });
 } finally {
   console.log('');
   const failed = results.filter((entry) => !entry.ok);
   console.log(`  场景：${results.length - failed.length}/${results.length} 通过`);
   for (const entry of failed) console.log(`    ✖ ${entry.name}: ${entry.error}`);
 
-  await service.stop();
-  await pages.close();
-  if (browser.pid) {
+  if (service) await service.stop();
+  if (pages) await pages.close();
+  if (browser?.pid) {
     try {
       process.kill(browser.pid);
     } catch {
