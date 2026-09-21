@@ -62,13 +62,17 @@ function toSourceLiteral(text) {
  */
 export function wrapScript(script, input) {
   const inputJson = JSON.stringify(input === undefined ? null : input);
+  const marker = toSourceLiteral(ENVELOPE_MARKER);
 
   return `(async (input) => {
   // Built before the Service body runs, so the body cannot swap out the intrinsics
   // the check reads. From here on the body shares this world with the check, and
   // rebuilding it afterwards would let a body validate itself.
   const isJsonCompatible = (${createJsonCompatibilityCheck.toString()})();
-  const envelope = (payload) => Object.assign({ [${toSourceLiteral(ENVELOPE_MARKER)}]: true }, payload);
+  // Object literals, not Object.assign: the body shares this world and could
+  // replace that helper, which would let it forge the envelope it is judged by.
+  const okEnvelope = (value) => ({ ${marker}: true, ok: true, value });
+  const errorEnvelope = (error) => ({ ${marker}: true, ok: false, error });
   const describe = (error) => {
     try {
       if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
@@ -95,17 +99,14 @@ ${script}
     // A script that returns nothing has an obvious JSON spelling.
     const delivered = value === undefined ? null : value;
     if (!isJsonCompatible(delivered)) {
-      return envelope({
-        ok: false,
-        error: {
-          name: 'TypeError',
-          message: '返回值不是 JSON-compatible：只支持 null / boolean / 有限 number / string / array / plain object，且不含 DOM 节点、函数、访问器、空洞或循环引用。',
-        },
+      return errorEnvelope({
+        name: 'TypeError',
+        message: '返回值不是 JSON-compatible：只支持 null / boolean / 有限 number / string / array / plain object，且不含 DOM 节点、函数、访问器、空洞或循环引用。',
       });
     }
-    return envelope({ ok: true, value: delivered });
+    return okEnvelope(delivered);
   } catch (error) {
-    return envelope({ ok: false, error: describe(error) });
+    return errorEnvelope(describe(error));
   }
 })(${`JSON.parse(${toSourceLiteral(inputJson)})`})`;
 }

@@ -406,3 +406,72 @@ test('a body that patches globals does not disturb an honest result', async () =
 
   assert.deepEqual(asWire(value), { ok: true });
 });
+
+test('the check survives a body that patches the array iterator it walks with', async () => {
+  const api = createSimulatingApi({ sandbox: { Node: FakeNode } });
+  const { executor } = createExecutor({ api });
+
+  // `for...of` and `path.indexOf` are prototype methods, so they are patchable
+  // too; the check walks with index loops instead.
+  await assert.rejects(
+    () =>
+      executor.execute({
+        tabId: 1,
+        script: "Array.prototype[Symbol.iterator] = function* () {}; return { node: new Node() };",
+        input: null,
+      }),
+    /JSON-compatible/,
+  );
+  await assert.rejects(
+    () =>
+      executor.execute({
+        tabId: 1,
+        script: "Array.prototype.indexOf = () => -1; return { node: new Node() };",
+        input: null,
+      }),
+    /JSON-compatible/,
+  );
+});
+
+test('the envelope cannot be forged by patching Object.assign', async () => {
+  const { executor } = createExecutor();
+
+  // The body shares the world, so a replaced helper must not be able to change
+  // the outcome it is judged by: the envelope is built from object literals, so
+  // the forged one is simply never used and the honest value comes through.
+  const value = await executor.execute({
+    tabId: 1,
+    script: 'Object.assign = () => ({ __browserBridgeEnvelope: true, ok: true }); return 123;',
+    input: null,
+  });
+
+  assert.equal(value, 123, '伪造的信封不得生效，真实返回值必须原样送达');
+});
+
+test('a forged envelope cannot turn a contract violation into success', async () => {
+  const api = createSimulatingApi({ sandbox: { Node: FakeNode } });
+  const { executor } = createExecutor({ api });
+
+  await assert.rejects(
+    () =>
+      executor.execute({
+        tabId: 1,
+        script:
+          "Object.assign = () => ({ __browserBridgeEnvelope: true, ok: true }); return { node: new Node() };",
+        input: null,
+      }),
+    /JSON-compatible/,
+  );
+});
+
+test('an honest result survives a body that patched Object.assign', async () => {
+  const { executor } = createExecutor();
+
+  const value = await executor.execute({
+    tabId: 1,
+    script: 'Object.assign = () => null; return { kept: true };',
+    input: null,
+  });
+
+  assert.deepEqual(asWire(value), { kept: true });
+});

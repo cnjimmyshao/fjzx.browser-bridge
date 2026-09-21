@@ -37,6 +37,7 @@ export const PARSE_FAILURES = Object.freeze({
   UNKNOWN_TYPE: 'UNKNOWN_TYPE',
   MISSING_JOB_ID: 'MISSING_JOB_ID',
   MISSING_SCRIPT: 'MISSING_SCRIPT',
+  UNSUPPORTED_INPUT: 'UNSUPPORTED_INPUT',
 });
 
 function isPlainObject(value) {
@@ -109,7 +110,19 @@ export function parseServiceMessage(raw) {
 
   // `input` and `metadata` are carried through untouched and never interpreted:
   // giving them meaning would put Service business semantics inside Bridge.
-  if ('input' in parsed) message.input = parsed.input;
+  if ('input' in parsed) {
+    // Valid JSON is not automatically a JSON-compatible JS value: `1e400` parses
+    // to Infinity and `-0` stays -0, and passing those on would silently change
+    // what the script receives. Refusing is the honest option.
+    if (!isJsonCompatible(parsed.input)) {
+      return fail(
+        PARSE_FAILURES.UNSUPPORTED_INPUT,
+        'input 不是 JSON-compatible（只支持 null/boolean/有限 number/string/array/plain object）。',
+        jobId,
+      );
+    }
+    message.input = parsed.input;
+  }
   if ('metadata' in parsed) message.metadata = parsed.metadata;
 
   return { ok: true, message };
@@ -176,7 +189,16 @@ export function createJsonCompatibilityCheck() {
   const toKey = String;
   const toNumber = Number;
 
-  const check = (candidate, path) => {
+  /**
+   * The branch currently being walked, indexed by depth.
+   *
+   * An explicit depth beats `push`/`pop`/`indexOf`: those are prototype methods,
+   * and a Service body shares this world, so an accidental polyfill on
+   * `Array.prototype` would otherwise change what the check sees.
+   */
+  const branch = [];
+
+  const check = (candidate, depth) => {
     if (candidate === null) return true;
 
     switch (typeof candidate) {
@@ -195,59 +217,72 @@ export function createJsonCompatibilityCheck() {
         return false;
     }
 
-    if (path.indexOf(candidate) !== -1) return false; // a cycle cannot be serialized
-    path.push(candidate);
-    try {
-      if (isArray(candidate)) {
-        // JSON keeps exactly the canonical indices below `length`, so anything
-        // else — a hole, a key like `4294967295`, a named property, a symbol key,
-        // a non-enumerable index, or a `toJSON` that JSON.stringify would call
-        // instead of reading the array — changes the value on the way out.
-        for (const key of ownKeys(candidate)) {
-          if (key === 'length') continue;
-          if (typeof key !== 'string') return false;
-          if (toKey(toNumber(key)) !== key || toNumber(key) >= candidate.length) return false;
-        }
-        for (let index = 0; index < candidate.length; index += 1) {
-          const descriptor = getOwnPropertyDescriptor(candidate, toKey(index));
-          if (descriptor === undefined) return false; // a hole
-          if (!descriptor.enumerable) return false;
-          // An accessor could yield a different value when it is read again, or
-          // throw, after the Job has already been cleared.
-          if (descriptor.get !== undefined || descriptor.set !== undefined) return false;
-          if (!check(descriptor.value, path)) return false;
-        }
-        return true;
-      }
+    for (let i = 0; i < depth; i += 1) {
+      if (branch[i] === candidate) return false; // a cycle cannot be serialized
+    }
+    branch[depth] = candidate;
+    const next = depth + 1;
 
-      const prototype = getPrototypeOf(candidate);
-      if (prototype !== objectPrototype && prototype !== null) {
-        // Date, Map, Set, RegExp, typed arrays, DOM nodes: all of them change
-        // shape on the way out, so none of them is "the value the script returned".
-        return false;
-      }
+    if (isArray(candidate)) {
+      const keys = ownKeys(candidate);
 
-      // JSON keeps only own enumerable string-keyed data properties, so anything
-      // else would be dropped or re-evaluated without the Service being able to
-      // tell. An accessor is rejected as well because reading it twice can yield
-      // two different values: the one that was validated need not be the one that
-      // gets sent.
-      for (const key of ownKeys(candidate)) {
+      // JSON keeps exactly the canonical indices below `length`, so any other
+      // own key — a hole, `"-1"`, `"NaN"`, `4294967295`, a named property, a
+      // symbol key, a non-enumerable index, or a `toJSON` that JSON.stringify
+      // would call instead of reading the array — changes the value on the way
+      // out.
+      let indexKeys = 0;
+      for (let i = 0; i < keys.length; i += 1) {
+        const key = keys[i];
+        if (key === 'length') continue;
         if (typeof key !== 'string') return false;
-        const descriptor = getOwnPropertyDescriptor(candidate, key);
+        const numeric = toNumber(key);
+        if (!isFinite(numeric) || numeric < 0) return false;
+        if (toKey(numeric) !== key) return false; // non-canonical, e.g. "01"
+        if (numeric >= candidate.length) return false;
+        indexKeys += 1;
+      }
+      if (indexKeys !== candidate.length) return false; // a hole
+
+      for (let index = 0; index < candidate.length; index += 1) {
+        const descriptor = getOwnPropertyDescriptor(candidate, toKey(index));
+        if (descriptor === undefined) return false; // a hole
         if (!descriptor.enumerable) return false;
+        // An accessor could yield a different value when it is read again, or
+        // throw, after the Job has already been cleared.
         if (descriptor.get !== undefined || descriptor.set !== undefined) return false;
-        if (!check(descriptor.value, path)) return false;
+        if (!check(descriptor.value, next)) return false;
       }
       return true;
-    } finally {
-      path.pop();
     }
+
+    const prototype = getPrototypeOf(candidate);
+    if (prototype !== objectPrototype && prototype !== null) {
+      // Date, Map, Set, RegExp, typed arrays, DOM nodes: all of them change
+      // shape on the way out, so none of them is "the value the script returned".
+      return false;
+    }
+
+    // JSON keeps only own enumerable string-keyed data properties, so anything
+    // else would be dropped or re-evaluated without the Service being able to
+    // tell. An accessor is rejected as well because reading it twice can yield
+    // two different values: the one that was validated need not be the one that
+    // gets sent.
+    const keys = ownKeys(candidate);
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
+      if (typeof key !== 'string') return false;
+      const descriptor = getOwnPropertyDescriptor(candidate, key);
+      if (!descriptor.enumerable) return false;
+      if (descriptor.get !== undefined || descriptor.set !== undefined) return false;
+      if (!check(descriptor.value, next)) return false;
+    }
+    return true;
   };
 
   return (value) => {
     try {
-      return check(value, []);
+      return check(value, 0);
     } catch {
       // A value whose contents cannot even be inspected is not one Bridge can
       // promise to deliver unchanged.
