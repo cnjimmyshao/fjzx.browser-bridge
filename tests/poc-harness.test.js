@@ -183,6 +183,27 @@ test('浏览器路径不可执行时返回失败，而不是让 error 事件掀�
   assert.equal(existsSync(profile), false, '启动失败时不应留下 profile');
 });
 
+test('浏览器进程启动后立刻退出时，立即报退出码而不是等满 30s', async () => {
+  // `process.execPath` runs and rejects the Chrome flags, so this is a process that
+  // spawns fine and then dies without ever opening the debugging port.
+  const freePort = await new Promise((resolve) => {
+    const probe = createTcpServer();
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+  const profile = join(tmpdir(), `bridge-poc-dies-${freePort}`);
+  const started = Date.now();
+
+  await assert.rejects(
+    launchBrowser({ exe: process.execPath, extensionPath: 'unused', port: freePort, profile }),
+    /浏览器进程已退出/,
+  );
+  assert.ok(Date.now() - started < 10000, '应立刻报退出码，而不是等满就绪期限');
+  assert.equal(existsSync(profile), false, '退出时应清理 profile');
+});
+
 test('openPage 返回新建的 target，而不是已存在的同前缀页面', async () => {
   // Reproduces the real hazard: `chrome://extensions` is still closing when
   // `allowUserScripts()` opens `chrome://extensions/?id=…`. Matching by URL prefix
@@ -237,15 +258,25 @@ test('CDP 只接受 TCP 却不应答升级请求时，握手必须有超时', as
   try {
     // The race is the test's own guard: without the handshake timeout this never
     // settles, and the race turns that into a failure instead of a hung suite.
-    await assert.rejects(
-      Promise.race([
-        evaluate(devtoolsPort, 'stalled-target', '1 + 1'),
-        new Promise((_resolve, reject) =>
-          setTimeout(() => reject(new Error('测试守卫：evaluate 在 12s 内没有返回')), 12000),
-        ),
-      ]),
-      /连接 CDP 超时/,
-    );
+    // The guard timer is cleared once the race settles, otherwise its 12s handle
+    // would keep the test process alive long after the assertion finished.
+    let guard;
+    try {
+      await assert.rejects(
+        Promise.race([
+          evaluate(devtoolsPort, 'stalled-target', '1 + 1'),
+          new Promise((_resolve, reject) => {
+            guard = setTimeout(
+              () => reject(new Error('测试守卫：evaluate 在 12s 内没有返回')),
+              12000,
+            );
+          }),
+        ]),
+        /连接 CDP 超时/,
+      );
+    } finally {
+      clearTimeout(guard);
+    }
   } finally {
     for (const socket of stalledSockets) socket.destroy();
     await new Promise((resolve) => stalled.close(resolve));

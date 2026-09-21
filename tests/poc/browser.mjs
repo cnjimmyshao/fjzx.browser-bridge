@@ -305,6 +305,14 @@ export async function launchBrowser(options) {
 
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
+    // A browser that starts and then dies — a startup failure, or an executable that
+    // is not really Chrome — never opens the port. Waiting out the full deadline
+    // would hide the exit code behind a generic timeout.
+    if (child.exitCode !== null) {
+      rmSync(profile, { recursive: true, force: true });
+      throw new Error(`浏览器进程已退出（退出码 ${child.exitCode}），调试端口 ${port} 没有打开。`);
+    }
+
     let version = null;
     try {
       const response = await cdpFetch(`http://127.0.0.1:${port}/json/version`, {}, 2000);
