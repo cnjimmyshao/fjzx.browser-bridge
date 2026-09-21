@@ -168,7 +168,45 @@ test('a thrown non-Error value is reported without blowing up', async () => {
     () => executor.execute({ tabId: 1, script: "throw { name: 'Weird', message: 'odd' };", input: null }),
     /Weird: odd/,
   );
-  await assert.rejects(() => executor.execute({ tabId: 1, script: 'throw "plain string";', input: null }));
+  // A primitive rejection has no name or message; `message` is the protocol's
+  // only diagnostic, so it must carry the value rather than "undefined: undefined".
+  await assert.rejects(
+    () => executor.execute({ tabId: 1, script: 'throw "plain reason";', input: null }),
+    /Error: plain reason/,
+  );
+  await assert.rejects(() => executor.execute({ tabId: 1, script: 'throw 42;', input: null }), /Error: 42/);
+  await assert.rejects(
+    () => executor.execute({ tabId: 1, script: 'await null; throw false;', input: null }),
+    /Error: false/,
+  );
+});
+
+test('the Service body receives input as its own parameter, not a closure', async () => {
+  const { executor } = createExecutor();
+
+  // `var input = input || {}` is ordinary normalisation; it only works when the
+  // parameter belongs to the very function holding the Service body.
+  const value = await executor.execute({
+    tabId: 1,
+    script: "var input = input || {};\nreturn input.n ?? 'missing';",
+    input: { n: 99 },
+  });
+
+  assert.equal(value, 99);
+});
+
+test('a __proto__ key in input keeps JSON semantics', async () => {
+  const { executor } = createExecutor();
+
+  // Pasted as an object literal this would set the prototype instead of creating
+  // an own property, so the script would receive something else entirely.
+  const value = await executor.execute({
+    tabId: 1,
+    script: "return { own: Object.prototype.hasOwnProperty.call(input, '__proto__'), flag: input.__proto__?.flag ?? null };",
+    input: JSON.parse('{"__proto__":{"flag":true}}'),
+  });
+
+  assert.deepEqual(asWire(value), { own: true, flag: true });
 });
 
 test('input reaches the script as its parameter', async () => {
@@ -218,16 +256,57 @@ test('an unsupported return type is refused rather than silently flattened', asy
   // A DOM node would otherwise arrive as {} after the structured clone.
   await assert.rejects(
     () => executor.execute({ tabId: 1, script: 'return new Node();', input: null }),
-    /DOM 节点/,
+    /JSON-compatible/,
   );
   await assert.rejects(
     () => executor.execute({ tabId: 1, script: 'return () => {};', input: null }),
-    /不受支持/,
+    /JSON-compatible/,
   );
   await assert.rejects(
     () => executor.execute({ tabId: 1, script: 'return globalThis;', input: null }),
-    /window/,
+    /JSON-compatible/,
   );
+});
+
+test('unsupported values nested anywhere are refused, not just at the top level', async () => {
+  const api = createSimulatingApi({ sandbox: { Node: FakeNode, document: { body: new FakeNode() } } });
+  const { executor } = createExecutor({ api });
+
+  // Each of these would be rewritten by the structured clone before the Bridge
+  // could look at it, so the check has to happen in the page.
+  const cases = [
+    'return { element: new Node() };',
+    'return [1, [2, new Node()]];',
+    'return { deep: { deeper: { node: new Node() } } };',
+    'return { n: NaN };',
+    'return { n: Infinity };',
+    'return [1, undefined, 3];',
+    'return { a: undefined };',
+    'return { a: () => {} };',
+    'return { when: new Date() };',
+    'return new Map();',
+    'const cyclic = {}; cyclic.self = cyclic; return cyclic;',
+  ];
+
+  for (const script of cases) {
+    await assert.rejects(
+      () => executor.execute({ tabId: 1, script, input: null }),
+      /JSON-compatible/,
+      script,
+    );
+  }
+});
+
+test('a clean nested value still passes the in-page check', async () => {
+  const { executor } = createExecutor();
+
+  const value = await executor.execute({
+    tabId: 1,
+    script: "return { a: [1, 'two', null, false], b: { c: { d: 1.5 } } };",
+    input: null,
+  });
+
+  assert.deepEqual(asWire(value), { a: [1, 'two', null, false], b: { c: { d: 1.5 } } });
 });
 
 test('a result without the envelope means the code never ran', async () => {
@@ -269,10 +348,30 @@ test('a non-string script is refused before anything is injected', async () => {
   assert.equal(api.injections.length, 0);
 });
 
-test('the wrapper is a function body, so the script may use return and await', () => {
-  const code = wrapScript("await null;\nreturn 1;", { a: 1 });
+test('the wrapper is a function body that owns its input parameter', () => {
+  const code = wrapScript('await null;\nreturn input.a;', { a: 1 });
 
   assert.match(code, /async \(input\) =>/);
-  assert.match(code, /await \(async \(\) => \{/);
-  assert.match(code, /"a":1/);
+  // The Service body sits in the function that declares `input`, so ordinary
+  // normalisation like `var input = input || {}` behaves as written.
+  assert.match(code, /await \(async \(input\) => \{[\s\S]*return input\.a;[\s\S]*\}\)\(input\)/);
+});
+
+test('input travels as JSON text and is parsed in the page', () => {
+  const code = wrapScript('return 1;', { a: 1 });
+
+  assert.match(code, /JSON\.parse\(/);
+  // Embedded as a literal, a `__proto__` key would set the prototype instead of
+  // creating the own property JSON.parse produces.
+  assert.doesNotMatch(code, /\}\)\(\(\{/);
+  assert.match(code, /JSON\.parse\("\{\\"a\\":1\}"\)/);
+});
+
+test('the in-page check is the very same rule the Bridge applies', () => {
+  const code = wrapScript('return 1;', null);
+
+  // One implementation, injected: the check has to run before the structured
+  // clone rewrites anything, and it must not drift from the Bridge-side rule.
+  assert.match(code, /const isJsonCompatible = function isJsonCompatible/);
+  assert.match(code, /isJsonCompatible\(delivered\)/);
 });

@@ -21,10 +21,12 @@ test('permissions stay at the minimum V1 needs', () => {
   // Every addition must be deliberate, so permission creep shows up as a reviewed
   // diff instead of slipping in:
   //   storage     — the single Service URL (V1.1)
+  //   tabs        — `tab.url` and `changeInfo.url` (V1.3). Host permissions cover
+  //                 http(s) but cannot cover `chrome://`, so without `tabs` a Work
+  //                 Tab navigating to a browser page goes unnoticed and keeps being
+  //                 reported as bound (verified).
   //   userScripts — running Service JavaScript at all (V1.5)
-  // `tabs` was dropped once the host permission below made `tab.url` readable
-  // anyway (verified): keeping both would not be the minimum.
-  assert.deepEqual(manifest.permissions, ['storage', 'userScripts']);
+  assert.deepEqual(manifest.permissions, ['storage', 'tabs', 'userScripts']);
 });
 
 test('the only host permission is <all_urls>, which names no site', () => {

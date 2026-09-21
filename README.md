@@ -132,12 +132,11 @@ Bridge 不会创建、关闭、恢复或重排任何 Tab，也不记住 Initial 
 | 权限 | 用途 |
 | --- | --- |
 | `storage` | 唯一持久配置 Service URL；Work Tab 绑定存于 `storage.session` |
+| `tabs` | 读取 `tab.url` 与 `changeInfo.url`。host 权限覆盖不了 `chrome://`，没有它时 Work Tab 导航到浏览器页面会被漏掉、继续被当成已绑定（实测） |
 | `userScripts` | 在 Work Tab 的 USER_SCRIPT world 执行 Service JavaScript |
 | `host_permissions: <all_urls>` | `execute()` 要求扩展对目标标签页有 host 权限（实测），否则拒绝执行 |
 
 没有 `optional_permissions`，也没有 content script。`<all_urls>` **不指向任何具体站点**：所有站点一视同仁，manifest 里不编码任何平台知识，因此 Bridge 仍然是"无业务语义"的。
-
-V1.3 曾申请过 `tabs`；加入 host 权限后 `tab.url` 已经可读（实测），该权限已按"最小权限"移除。
 
 ## Service 连接
 

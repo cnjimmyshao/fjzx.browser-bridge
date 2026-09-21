@@ -1,16 +1,17 @@
+import { isJsonCompatible } from './protocol.js';
+
 /**
  * Execute Service JavaScript in the Work Tab through Chrome's userScripts API.
  *
  * Everything here exists because of how `chrome.userScripts.execute()` actually
- * behaves (verified against Chrome for Testing 153.0.8010.52 — see the notes on
- * `wrapScript` and `execute` below). In particular a script that throws, and a
- * script that does not even parse, both come back as a *resolved* call whose
- * `result` is `null`. That is indistinguishable from a script that returned
- * `null`, so the outcome has to be reported from inside the page rather than
- * inferred from the API's return value.
+ * behaves (verified against Chrome for Testing 153.0.8010.52). In particular a
+ * script that throws, and a script that does not even parse, both come back as a
+ * *resolved* call whose `result` is `null` — indistinguishable from a script that
+ * returned `null`. The outcome therefore has to be reported from inside the page
+ * rather than inferred from the API's return value.
  *
- * The API and the world are injected so `node --test` can exercise the whole
- * mapping without a browser.
+ * The API is injected so `node --test` can exercise the whole mapping without a
+ * browser.
  */
 
 /** The only world V1 is allowed to use. MAIN is deliberately never requested. */
@@ -23,6 +24,11 @@ export const USER_SCRIPT_WORLD = 'USER_SCRIPT';
  */
 const ENVELOPE_MARKER = '__browserBridgeEnvelope';
 
+/** Turn JSON text into a JavaScript string literal, U+2028/U+2029 included. */
+function toSourceLiteral(text) {
+  return JSON.stringify(text).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+
 /**
  * Build the code that is actually injected.
  *
@@ -33,53 +39,72 @@ const ENVELOPE_MARKER = '__browserBridgeEnvelope';
  * return document.querySelector('h1').textContent;
  * ```
  *
- * `input` arrives as that function's parameter. The envelope is built outside the
- * script, so a script value that happens to contain these keys cannot be mistaken
- * for the envelope itself.
+ * Three details are deliberate:
+ *
+ * - **`input` is a real parameter of the function holding the Service body.** A
+ *   nested zero-argument function that merely closed over it would break a body
+ *   as ordinary as `var input = input || {};`, which would hoist a fresh, empty
+ *   binding and silently discard the Service's input.
+ * - **The JSON is parsed in the page, not pasted as a literal.** Written as an
+ *   object literal, a `__proto__` key sets the prototype instead of creating the
+ *   own property `JSON.parse` would produce, so the script would receive something
+ *   other than what the Service sent.
+ * - **The value is checked recursively before it leaves the page**, using the very
+ *   same `isJsonCompatible` the Bridge applies. The browser's structured clone
+ *   silently rewrites what JSON cannot carry (a DOM node becomes `{}`), and once
+ *   that has happened the check has nothing left to reject.
+ *
+ * The envelope is built outside the Service script, so a script value containing
+ * the marker key cannot be mistaken for the envelope itself.
  *
  * @param {string} script
  * @param {unknown} input
  */
 export function wrapScript(script, input) {
-  // U+2028/U+2029 are legal in JSON strings but were line terminators in older
-  // JavaScript, so they are escaped rather than pasted into the source.
-  const inputJson = JSON.stringify(input === undefined ? null : input)
-    .replace(/\u2028/g, '\\u2028')
-    .replace(/\u2029/g, '\\u2029');
+  const inputJson = JSON.stringify(input === undefined ? null : input);
 
   return `(async (input) => {
-  const envelope = (payload) => Object.assign({ ${ENVELOPE_MARKER}: true }, payload);
+  const isJsonCompatible = ${isJsonCompatible.toString()};
+  const envelope = (payload) => Object.assign({ [${toSourceLiteral(ENVELOPE_MARKER)}]: true }, payload);
   const describe = (error) => {
     try {
-      return { name: String(error && error.name), message: String(error && error.message) };
+      if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
+        const name = error.name;
+        const message = error.message;
+        if (name !== undefined || message !== undefined) {
+          return {
+            name: String(name === undefined ? 'Error' : name),
+            message: String(message === undefined ? '' : message),
+          };
+        }
+      }
+      // A primitive rejection such as throwing a bare string has no name or
+      // message, and message is the protocol's only diagnostic.
+      return { name: 'Error', message: String(error) };
     } catch {
       return { name: 'Error', message: '无法读取脚本抛出的错误信息' };
     }
   };
   try {
-    const value = await (async () => {
+    const value = await (async (input) => {
 ${script}
-    })();
-    // The architecture allows only stable JSON values. A DOM node, the window or
-    // a function would otherwise be silently flattened by the structured clone
-    // (a DOM element arrives as {}), which would look like a successful result.
-    const type = typeof value;
-    if (type === 'function' || type === 'symbol' || type === 'bigint') {
-      return envelope({ ok: false, error: { name: 'TypeError', message: '返回值类型不受支持：' + type } });
+    })(input);
+    // A script that returns nothing has an obvious JSON spelling.
+    const delivered = value === undefined ? null : value;
+    if (!isJsonCompatible(delivered)) {
+      return envelope({
+        ok: false,
+        error: {
+          name: 'TypeError',
+          message: '返回值不是 JSON-compatible：只支持 null / boolean / 有限 number / string / array / plain object，且不含 DOM 节点、函数、访问器、空洞或循环引用。',
+        },
+      });
     }
-    if (value !== null && type === 'object') {
-      if (value === globalThis) {
-        return envelope({ ok: false, error: { name: 'TypeError', message: '不能返回 window 本身' } });
-      }
-      if (typeof Node !== 'undefined' && value instanceof Node) {
-        return envelope({ ok: false, error: { name: 'TypeError', message: '不能返回 DOM 节点' } });
-      }
-    }
-    return envelope({ ok: true, value: value === undefined ? null : value });
+    return envelope({ ok: true, value: delivered });
   } catch (error) {
     return envelope({ ok: false, error: describe(error) });
   }
-})(${inputJson})`;
+})(${`JSON.parse(${toSourceLiteral(inputJson)})`})`;
 }
 
 /**
@@ -89,8 +114,9 @@ ${script}
  * }} [options]
  */
 export function createUserScriptExecutor(options = {}) {
-  const { api: injectedApi, logger = {} } = options;
+  const { logger = {} } = options;
   const hasInjectedApi = Object.hasOwn(options, 'api');
+  const injectedApi = options.api;
 
   /**
    * Resolved on every use rather than captured once.
