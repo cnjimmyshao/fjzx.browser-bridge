@@ -18,7 +18,13 @@ class FakeWebSocket {
     this.url = url;
     this.readyState = 0;
     this.closeCalls = 0;
+    this.sent = [];
     FakeWebSocket.created.push(this);
+  }
+
+  send(text) {
+    if (this.throwOnSend) throw new Error('send failed');
+    this.sent.push(text);
   }
 
   close() {
@@ -376,6 +382,44 @@ test('a state handler that switches endpoint on CONNECTING keeps the close notif
   assert.equal(h.sockets().length, 2, '关闭确认到达后应立即拨号');
   assert.equal(h.sockets()[1].url, 'ws://second');
   assert.equal(h.timers.pendingCount(), 0, '宽限定时器应已被清理');
+});
+
+test('sending is refused until the connection is actually open', () => {
+  const h = createHarness({ reconnectDelaysMs: [10] });
+
+  assert.equal(h.connection.send('early'), false, '未配置时不得发送');
+
+  h.connection.setUrl('ws://service');
+  assert.equal(h.connection.state, CONNECTION_STATES.CONNECTING);
+  assert.equal(h.connection.send('while-connecting'), false, '握手完成前不得发送');
+
+  h.sockets()[0].open();
+  assert.equal(h.connection.send('{"type":"STATUS"}'), true);
+  assert.deepEqual(h.sockets()[0].sent, ['{"type":"STATUS"}']);
+});
+
+test('sending is refused after the connection drops, and never throws', () => {
+  const h = createHarness({ reconnectDelaysMs: [10] });
+  h.connection.setUrl('ws://service');
+  h.sockets()[0].open();
+  h.sockets()[0].fireClose();
+
+  assert.equal(h.connection.send('too-late'), false);
+});
+
+test('a throwing socket send is reported instead of thrown', () => {
+  const warnings = [];
+  const h = createHarness({
+    reconnectDelaysMs: [10],
+    logger: { info: () => {}, warn: (...args) => warnings.push(args) },
+  });
+  h.connection.setUrl('ws://service');
+  h.sockets()[0].open();
+  h.sockets()[0].throwOnSend = true;
+
+  assert.doesNotThrow(() => h.connection.send('boom'));
+  assert.equal(h.connection.send('boom'), false);
+  assert.equal(warnings.length, 2);
 });
 
 test('raw frames reach the handler, including text that is not JSON', () => {

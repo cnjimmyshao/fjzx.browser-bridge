@@ -297,6 +297,27 @@ export function createServiceConnection(options = {}) {
       setState(CONNECTION_STATES.DISCONNECTED);
     },
 
+    /**
+     * Send one text frame to the Service.
+     *
+     * Returns false when there is nothing to send it on. V1 has no offline queue
+     * and no retry, so the caller decides what a dropped message means — the
+     * protocol layer logs it and leaves the Service to time out.
+     *
+     * @param {string} text
+     * @returns {boolean}
+     */
+    send(text) {
+      if (socket === null || state !== CONNECTION_STATES.CONNECTED) return false;
+      try {
+        socket.send(text);
+        return true;
+      } catch (error) {
+        logger.warn?.('[bridge] failed to send to the service', error);
+        return false;
+      }
+    },
+
     /** @param {(data: unknown) => void} handler */
     setMessageHandler(handler) {
       messageHandler = typeof handler === 'function' ? handler : null;
