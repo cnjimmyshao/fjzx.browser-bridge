@@ -153,6 +153,33 @@ test('delivers raw Service frames and survives a non-JSON payload', async (t) =>
   assert.equal(server.openCount(), 1);
 });
 
+test('does not dial a replacement until the previous connection has really closed', async (t) => {
+  // `close()` only starts the closing handshake. A Service that never answers it
+  // keeps its TCP connection open, so a Bridge that dialled immediately would
+  // have two Service connections open at once.
+  const stubborn = await startTestWebSocketServer({ respondToClose: false });
+  const fresh = await startTestWebSocketServer();
+  const connection = createServiceConnection({ reconnectDelaysMs: [30], closeGraceMs: 400 });
+  t.after(async () => {
+    connection.stop();
+    await Promise.all([stubborn.close(), fresh.close()]);
+  });
+
+  connection.setUrl(stubborn.url);
+  await stubborn.waitForConnections(1);
+  await waitForState(connection, CONNECTION_STATES.CONNECTED);
+
+  connection.setUrl(fresh.url);
+  await sleep(120);
+  assert.equal(stubborn.openCount(), 1, '对端未确认关闭时旧连接仍在');
+  assert.equal(fresh.totalAccepted(), 0, '握手完成前不得拨号');
+
+  // The bounded grace period is the escape hatch: an unresponsive Service must
+  // not block the switch forever. The WebSocket API offers no forced close.
+  await fresh.waitForConnections(1, 3000);
+  await waitForState(connection, CONNECTION_STATES.CONNECTED, 3000);
+});
+
 test('an endpoint with nothing listening does not crash and keeps its retry loop', async (t) => {
   const probe = await startTestWebSocketServer();
   const { port } = probe;

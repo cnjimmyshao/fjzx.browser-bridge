@@ -23,7 +23,7 @@ class FakeWebSocket {
 
   close() {
     this.closeCalls += 1;
-    this.readyState = 3;
+    this.readyState = 2; // CLOSING: the handshake has started, not finished
   }
 
   // --- drivers used by the tests ---
@@ -40,7 +40,8 @@ class FakeWebSocket {
     this.onerror?.({});
   }
 
-  dropFromService() {
+  /** The socket is gone: either an unintended drop, or a completed close. */
+  fireClose() {
     this.readyState = 3;
     this.onclose?.({});
   }
@@ -146,26 +147,80 @@ test('re-setting the same URL does not open a second socket', () => {
   assert.equal(h.sockets()[0].closeCalls, 0);
 });
 
-test('changing the Service URL closes the old socket and dials only the new one', () => {
-  const h = createHarness();
+test('waits for the outgoing socket to close before dialing the replacement', () => {
+  const h = createHarness({ closeGraceMs: 1000 });
   h.connection.setUrl('ws://first');
   const first = h.sockets()[0];
   first.open();
 
   h.connection.setUrl('ws://second');
 
+  // close() only starts the handshake, so the replacement must not exist yet:
+  // otherwise both Service connections would be open at the same time.
   assert.equal(first.closeCalls, 1);
+  assert.equal(h.sockets().length, 1, '旧连接关闭完成前不得拨号');
+
+  first.fireClose(); // the peer acknowledged, or the socket is gone
+
   assert.equal(h.sockets().length, 2);
   assert.equal(h.sockets()[1].url, 'ws://second');
-  assert.equal(h.connection.url, 'ws://second');
+});
+
+test('dials the replacement anyway once the close grace elapses', () => {
+  const h = createHarness({ closeGraceMs: 1000 });
+  h.connection.setUrl('ws://first');
+  h.sockets()[0].open();
+
+  h.connection.setUrl('ws://second');
+  assert.equal(h.sockets().length, 1);
+  assert.deepEqual(h.timers.delays(), [1000], '应有且仅有一个关闭宽限定时器');
+
+  h.timers.fireAll(); // an unresponsive Service must not block the switch forever
+
+  assert.equal(h.sockets().length, 2);
+  assert.equal(h.sockets()[1].url, 'ws://second');
+});
+
+test('a URL change during the closing handshake dials only the newest endpoint', () => {
+  const h = createHarness({ closeGraceMs: 1000 });
+  h.connection.setUrl('ws://first');
+  const first = h.sockets()[0];
+  first.open();
+
+  h.connection.setUrl('ws://second'); // starts retiring `first`
+  h.connection.setUrl('ws://third'); // supersedes it before the close lands
+  assert.equal(h.sockets().length, 1, '握手完成前仍不应拨号');
+
+  first.fireClose(); // the retirement already in flight converges on `third`
+
+  assert.equal(h.sockets().length, 2);
+  assert.equal(h.sockets()[1].url, 'ws://third');
+  assert.equal(h.connection.url, 'ws://third');
+});
+
+test('clearing the URL during the closing handshake cancels the pending dial', () => {
+  const h = createHarness({ closeGraceMs: 1000 });
+  h.connection.setUrl('ws://first');
+  const first = h.sockets()[0];
+  first.open();
+
+  h.connection.setUrl('ws://second');
+  h.connection.setUrl('');
+
+  first.fireClose();
+  h.timers.fireAll();
+
+  assert.equal(h.sockets().length, 1, '清除配置后不得再拨号');
+  assert.equal(h.connection.url, '');
 });
 
 test('late events from a replaced socket cannot disturb the live connection', () => {
-  const h = createHarness();
+  const h = createHarness({ closeGraceMs: 1000 });
   h.connection.setUrl('ws://first');
   const first = h.sockets()[0];
 
   h.connection.setUrl('ws://second');
+  first.fireClose();
   const second = h.sockets()[1];
   second.open();
 
@@ -173,7 +228,7 @@ test('late events from a replaced socket cannot disturb the live connection', ()
   // connection: otherwise a dying socket could schedule a spurious reconnect.
   first.open();
   first.fail();
-  first.dropFromService();
+  first.fireClose();
 
   assert.equal(h.connection.state, CONNECTION_STATES.CONNECTED);
   assert.equal(h.timers.pendingCount(), 0);
@@ -185,7 +240,7 @@ test('reconnects after an unintended drop using the first backoff delay', () => 
   h.connection.setUrl('ws://service');
   h.sockets()[0].open();
 
-  h.sockets()[0].dropFromService();
+  h.sockets()[0].fireClose();
 
   assert.equal(h.connection.state, CONNECTION_STATES.DISCONNECTED);
   assert.deepEqual(h.timers.delays(), [10]);
@@ -203,7 +258,7 @@ test('an error schedules no reconnect of its own; the close event does', () => {
   socket.fail();
   assert.equal(h.timers.pendingCount(), 0, '失败本身不得排定重连');
 
-  socket.dropFromService();
+  socket.fireClose();
   assert.equal(h.timers.pendingCount(), 1, '只应存在一个待重连定时器');
 });
 
@@ -214,7 +269,7 @@ test('an unreachable Service does not crash the caller and keeps retrying', () =
   assert.doesNotThrow(() => {
     for (let i = 0; i < 3; i++) {
       h.sockets().at(-1).fail();
-      h.sockets().at(-1).dropFromService();
+      h.sockets().at(-1).fireClose();
       h.timers.fireAll();
     }
   });
@@ -229,7 +284,7 @@ test('backoff grows with consecutive failures and then repeats the last delay', 
 
   const observed = [];
   for (let i = 0; i < 4; i++) {
-    h.sockets().at(-1).dropFromService();
+    h.sockets().at(-1).fireClose();
     observed.push(...h.timers.delays());
     h.timers.fireAll();
   }
@@ -241,14 +296,14 @@ test('a successful connection resets the backoff', () => {
   const h = createHarness({ reconnectDelaysMs: [10, 20, 40] });
   h.connection.setUrl('ws://service');
 
-  h.sockets().at(-1).dropFromService();
+  h.sockets().at(-1).fireClose();
   h.timers.fireAll();
-  h.sockets().at(-1).dropFromService();
+  h.sockets().at(-1).fireClose();
   assert.deepEqual(h.timers.delays(), [20]);
 
   h.timers.fireAll();
   h.sockets().at(-1).open(); // recovered
-  h.sockets().at(-1).dropFromService();
+  h.sockets().at(-1).fireClose();
 
   assert.deepEqual(h.timers.delays(), [10], '恢复后应回到首个退避值');
 });
@@ -263,7 +318,7 @@ test('clearing the Service URL closes the socket and stops reconnecting', () => 
 
   assert.equal(socket.closeCalls, 1);
   assert.equal(h.connection.state, CONNECTION_STATES.DISCONNECTED);
-  assert.equal(h.timers.pendingCount(), 0);
+  assert.equal(h.timers.pendingCount(), 0, '没有替代端点时不应留下宽限定时器');
   assert.equal(h.sockets().length, 1, '清除配置后不得再拨号');
 });
 
@@ -271,7 +326,7 @@ test('stop() closes the connection and cancels any pending retry', () => {
   const h = createHarness({ reconnectDelaysMs: [10] });
   h.connection.setUrl('ws://service');
   h.sockets()[0].open();
-  h.sockets()[0].dropFromService();
+  h.sockets()[0].fireClose();
   assert.equal(h.timers.pendingCount(), 1);
 
   h.connection.stop();

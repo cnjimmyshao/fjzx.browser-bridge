@@ -89,7 +89,11 @@ function withTimeout(promise, timeoutMs, message) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-export async function startTestWebSocketServer({ connectTimeoutMs = 2000, port = 0 } = {}) {
+export async function startTestWebSocketServer({
+  connectTimeoutMs = 2000,
+  port = 0,
+  respondToClose = true,
+} = {}) {
   /** @type {Array<object>} accepted connections, in accept order */
   const connections = [];
   let totalAccepted = 0;
@@ -175,7 +179,9 @@ export async function startTestWebSocketServer({ connectTimeoutMs = 2000, port =
         } else if (frame.opcode === OPCODE_PING) {
           socket.write(encodeFrame(OPCODE_PONG, frame.payload));
         } else if (frame.opcode === OPCODE_CLOSE) {
-          socket.end(encodeFrame(OPCODE_CLOSE, frame.payload));
+          // `respondToClose: false` models a Service that never acknowledges the
+          // closing handshake, leaving its side of the TCP connection open.
+          if (respondToClose) socket.end(encodeFrame(OPCODE_CLOSE, frame.payload));
         }
       }
     });

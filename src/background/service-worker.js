@@ -1,3 +1,4 @@
+import { createServiceConfigSync } from '../lib/service-config.js';
 import { createServiceConnection } from '../lib/service-connection.js';
 import { createSettingsStore } from '../lib/settings-store.js';
 import { SERVICE_URL_STORAGE_KEY } from '../lib/service-url.js';
@@ -11,7 +12,7 @@ import { SERVICE_URL_STORAGE_KEY } from '../lib/service-url.js';
  *
  * Note that a Manifest V3 worker is not persistent: Chrome may terminate it when
  * idle, which also drops the socket. Every wake-up re-runs this module and
- * re-dials, so `syncFromStorage` is called both on lifecycle events and at the
+ * re-dials, so `configSync.sync()` is called both on lifecycle events and at the
  * bottom of this file.
  */
 
@@ -28,37 +29,27 @@ connection.setMessageHandler((data) => {
   );
 });
 
-function describeUrl(serviceUrl) {
-  return serviceUrl === '' ? 'not configured' : 'configured';
-}
-
-/** @param {string} trigger what caused this sync, for diagnostics */
-async function syncFromStorage(trigger) {
-  try {
-    const serviceUrl = await store.readServiceUrl();
-    console.info(`[bridge] ${trigger}: service URL ${describeUrl(serviceUrl)}`);
-    connection.setUrl(serviceUrl);
-  } catch (error) {
-    console.warn(`[bridge] ${trigger}: failed to read the service URL`, error);
-  }
-}
+const configSync = createServiceConfigSync({
+  readServiceUrl: () => store.readServiceUrl(),
+  applyServiceUrl: (serviceUrl) => connection.setUrl(serviceUrl),
+  logger: console,
+});
 
 // Listeners are registered synchronously: a Manifest V3 worker must have them in
 // place before it finishes evaluating.
 chrome.runtime.onInstalled.addListener(() => {
-  void syncFromStorage('onInstalled');
+  void configSync.sync('onInstalled');
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  void syncFromStorage('onStartup');
+  void configSync.sync('onStartup');
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return;
   const change = changes[SERVICE_URL_STORAGE_KEY];
   if (!change) return;
-  console.info('[bridge] service URL changed; switching connection');
-  connection.setUrl(typeof change.newValue === 'string' ? change.newValue : '');
+  configSync.applyStorageChange(change.newValue);
 });
 
-void syncFromStorage('worker-start');
+void configSync.sync('worker-start');

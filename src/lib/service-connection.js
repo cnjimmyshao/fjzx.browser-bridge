@@ -28,6 +28,14 @@ export const CONNECTION_STATES = Object.freeze({
  */
 export const DEFAULT_RECONNECT_DELAYS_MS = Object.freeze([1000, 2000, 5000, 15000]);
 
+/**
+ * How long to wait for a replaced endpoint to acknowledge the closing handshake
+ * before dialling the new one anyway. `WebSocket.close()` only *starts* that
+ * handshake, so without this the old socket could still be an open TCP
+ * connection while its replacement is being established.
+ */
+export const DEFAULT_CLOSE_GRACE_MS = 1000;
+
 const NOOP_LOGGER = { info: () => {}, warn: () => {} };
 
 export function createServiceConnection(options = {}) {
@@ -36,6 +44,7 @@ export function createServiceConnection(options = {}) {
     setTimeoutImpl = setTimeout,
     clearTimeoutImpl = clearTimeout,
     reconnectDelaysMs = DEFAULT_RECONNECT_DELAYS_MS,
+    closeGraceMs = DEFAULT_CLOSE_GRACE_MS,
     logger = NOOP_LOGGER,
   } = options;
 
@@ -46,8 +55,11 @@ export function createServiceConnection(options = {}) {
     throw new TypeError('reconnectDelaysMs 必须是非空数组。');
   }
 
-  /** The one active socket, or null. Every other socket is stale by definition. */
+  /** The one live socket, or null. Every other socket is stale by definition. */
   let socket = null;
+  /** True while a replaced socket's closing handshake is still in flight. */
+  let retiring = false;
+
   let url = '';
   let state = CONNECTION_STATES.DISCONNECTED;
   let attempt = 0;
@@ -75,10 +87,68 @@ export function createServiceConnection(options = {}) {
   }
 
   /**
-   * Drop the current socket without letting its late events be mistaken for the
-   * next connection's. Handlers are detached before closing.
+   * Converge on whatever endpoint is currently desired.
+   *
+   * Called after every retirement settles, so a URL change that arrives mid
+   * handshake is honoured by the retirement already in flight instead of being
+   * lost. This is the single place that decides whether a dial is allowed.
    */
-  function closeSocket() {
+  function dialIfDesired() {
+    if (stopped || url === '') return;
+    if (retiring) return; // the in-flight retirement will call back here
+    openSocket();
+  }
+
+  /**
+   * Retire the current socket without dialling a replacement.
+   *
+   * Handlers are detached first so the outgoing socket's late events can never be
+   * mistaken for the next connection's. Because `close()` merely begins the
+   * closing handshake, the replacement is deferred until the handshake is
+   * observed, bounded by `closeGraceMs` so an unresponsive Service cannot block
+   * the switch forever.
+   *
+   * @returns {boolean} whether a retirement is now in flight
+   */
+  function retireSocket() {
+    const stale = socket;
+    if (!stale) return false;
+
+    socket = null;
+    stale.onopen = null;
+    stale.onmessage = null;
+    stale.onerror = null;
+
+    retiring = true;
+    let settled = false;
+    let graceTimer = null;
+
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      if (graceTimer !== null) clearTimeoutImpl(graceTimer);
+      stale.onclose = null;
+      retiring = false;
+      dialIfDesired();
+    };
+
+    stale.onclose = settle;
+    graceTimer = setTimeoutImpl(() => {
+      logger.warn?.(`[bridge] previous connection did not close within ${closeGraceMs}ms`);
+      settle();
+    }, closeGraceMs);
+
+    try {
+      stale.close();
+    } catch {
+      settle();
+    }
+
+    return true;
+  }
+
+  /** Retire the current socket and abandon it: no replacement is dialled. */
+  function dropSocket() {
     const stale = socket;
     if (!stale) return;
     socket = null;
@@ -126,9 +196,8 @@ export function createServiceConnection(options = {}) {
 
   function openSocket() {
     if (stopped || url === '') return;
+    if (retiring) return;
     clearReconnect();
-    // Guarantees "at most one active Service WebSocket" on every path in.
-    closeSocket();
 
     const ws = createSocket();
     if (!ws) return;
@@ -188,23 +257,34 @@ export function createServiceConnection(options = {}) {
       const next = typeof nextUrl === 'string' ? nextUrl.trim() : '';
 
       if (next === url) {
-        if (next !== '' && socket === null && reconnectTimer === null) openSocket();
+        if (next !== '' && socket === null && !retiring && reconnectTimer === null) openSocket();
         return;
       }
 
       url = next;
       attempt = 0;
       clearReconnect();
-      closeSocket();
       setState(CONNECTION_STATES.DISCONNECTED);
-      if (url !== '') openSocket();
+
+      if (url === '') {
+        // Nothing to converge on: close now, without waiting on a handshake.
+        dropSocket();
+        return;
+      }
+
+      if (socket !== null) {
+        // A retirement now in flight will dial the (possibly newer) endpoint.
+        retireSocket();
+        return;
+      }
+      dialIfDesired();
     },
 
     /** Close the connection and stop reconnecting; the worker is going away. */
     stop() {
       stopped = true;
       clearReconnect();
-      closeSocket();
+      dropSocket();
       setState(CONNECTION_STATES.DISCONNECTED);
     },
 
