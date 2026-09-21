@@ -37,9 +37,36 @@ const configSync = createServiceConfigSync({
   logger: console,
 });
 
+const WORK_TAB_BINDING_KEY = 'workTabBinding';
+
+/**
+ * Remember which tab Bridge was driving across a worker suspension.
+ *
+ * Chrome suspends this worker whenever it goes idle, which discards module
+ * state; without a persisted binding, closing the Work Tab right after a wake
+ * would look like "there was never a tab" instead of WORK_TAB_CLOSED.
+ * `storage.session` is in-memory for the browser session, so the Service URL
+ * stays the only *persistent* configuration.
+ */
+function createWorkTabBinding() {
+  const area = chrome.storage?.session;
+  if (!area) return undefined;
+  return {
+    async read() {
+      const stored = await area.get(WORK_TAB_BINDING_KEY);
+      const value = stored?.[WORK_TAB_BINDING_KEY];
+      return value && typeof value === 'object' ? value : null;
+    },
+    async write(state) {
+      await area.set({ [WORK_TAB_BINDING_KEY]: state });
+    },
+  };
+}
+
 // Exposed for later issues; V1.3 only keeps it current and logs transitions.
 const workTab = createWorkTabManager({
   tabs: chrome.tabs,
+  binding: createWorkTabBinding(),
   logger: console,
 });
 

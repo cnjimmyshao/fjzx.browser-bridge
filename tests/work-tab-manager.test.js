@@ -10,44 +10,83 @@ const settle = () => sleep(5);
 const web = (id, url = 'https://example.test/page') => ({ id, url });
 const browser = (id, url) => ({ id, url });
 
-/** Minimal `chrome.tabs` stand-in that records listener registrations. */
-function createFakeTabs(initialTabs = []) {
+/**
+ * Minimal `chrome.tabs` stand-in: records listener registrations, and can either
+ * answer queries immediately or hand the test control over when each one
+ * resolves, so ordering can be exercised deterministically.
+ */
+function createFakeTabs(initialTabs = [], { manual = false } = {}) {
   let tabs = [...initialTabs];
-  const listeners = { onCreated: [], onRemoved: [], onUpdated: [] };
+  let failQueries = false;
+  const listeners = { onCreated: [], onRemoved: [], onUpdated: [], onReplaced: [] };
   const queries = [];
+  const pending = [];
+
+  const emit = (name, ...args) => {
+    for (const fn of listeners[name]) fn(...args);
+  };
 
   return {
     api: {
-      async query(queryInfo) {
+      query(queryInfo) {
         queries.push(queryInfo);
-        return tabs.map((tab) => ({ ...tab }));
+        if (failQueries) return Promise.reject(new Error('tabs unavailable'));
+        const snapshot = tabs.map((tab) => ({ ...tab }));
+        if (!manual) return Promise.resolve(snapshot);
+        return new Promise((resolve, reject) => pending.push({ resolve, reject, snapshot }));
       },
       onCreated: { addListener: (fn) => listeners.onCreated.push(fn) },
       onRemoved: { addListener: (fn) => listeners.onRemoved.push(fn) },
       onUpdated: { addListener: (fn) => listeners.onUpdated.push(fn) },
+      onReplaced: { addListener: (fn) => listeners.onReplaced.push(fn) },
     },
     queryCount: () => queries.length,
+    pendingQueryCount: () => pending.length,
+    /** Resolve the n-th still-pending query, optionally with an explicit snapshot. */
+    resolveQuery(index, snapshot) {
+      const entry = pending.splice(index, 1)[0];
+      if (!entry) throw new Error(`没有第 ${index} 个待决查询`);
+      entry.resolve(snapshot ?? entry.snapshot);
+    },
+    failQueries(value = true) {
+      failQueries = value;
+    },
+    setTabs(next) {
+      tabs = [...next];
+    },
+    /** The creation event only, without altering the tab list. */
+    async emitCreated(tab) {
+      emit('onCreated', tab);
+      await settle();
+    },
     async addTab(tab) {
       tabs.push(tab);
-      for (const fn of listeners.onCreated) fn(tab);
+      emit('onCreated', tab);
       await settle();
     },
     async removeTab(tabId) {
       tabs = tabs.filter((tab) => tab.id !== tabId);
-      for (const fn of listeners.onRemoved) fn(tabId);
+      emit('onRemoved', tabId);
+      await settle();
+    },
+    /** The removal event only, as when the worker wakes because a tab closed. */
+    async emitRemoved(tabId) {
+      emit('onRemoved', tabId);
       await settle();
     },
     async navigate(tabId, url) {
       tabs = tabs.map((tab) => (tab.id === tabId ? { ...tab, url } : tab));
-      for (const fn of listeners.onUpdated) fn(tabId, { url });
+      emit('onUpdated', tabId, { url });
       await settle();
     },
     async emitUpdated(tabId, changeInfo) {
-      for (const fn of listeners.onUpdated) fn(tabId, changeInfo);
+      emit('onUpdated', tabId, changeInfo);
       await settle();
     },
-    async emitCreated(tab) {
-      for (const fn of listeners.onCreated) fn(tab);
+    async replaceTab(addedTab, removedTabId) {
+      tabs = tabs.filter((tab) => tab.id !== removedTabId);
+      tabs.push(addedTab);
+      emit('onReplaced', addedTab.id, removedTabId);
       await settle();
     },
   };
@@ -58,15 +97,31 @@ function createRecorder() {
   return { seen, onChange: (state, trigger) => seen.push({ ...state, trigger }) };
 }
 
+function createMemoryBinding(initial = null) {
+  const writes = [];
+  let stored = initial;
+  return {
+    writes,
+    read: async () => stored,
+    write: async (state) => {
+      writes.push(state);
+      stored = state;
+    },
+  };
+}
+
 test('requires a tabs API with query and the lifecycle events', () => {
-  const fake = createFakeTabs().api;
   assert.throws(() => createWorkTabManager({ tabs: undefined }), TypeError);
   assert.throws(() => createWorkTabManager({ tabs: {} }), TypeError);
   assert.throws(() => createWorkTabManager({ tabs: { query: () => {} } }), TypeError);
-  assert.throws(
-    () => createWorkTabManager({ tabs: { ...fake, onUpdated: undefined } }),
-    TypeError,
-  );
+  for (const missing of ['onCreated', 'onRemoved', 'onUpdated', 'onReplaced']) {
+    const api = createFakeTabs().api;
+    assert.throws(
+      () => createWorkTabManager({ tabs: { ...api, [missing]: undefined } }),
+      TypeError,
+      `${missing} 缺失时应拒绝`,
+    );
+  }
 });
 
 test('binds the only ordinary tab on refresh', async () => {
@@ -153,8 +208,6 @@ test('a browser page becoming an ordinary page is picked up', async () => {
   await manager.refresh('worker-start');
   assert.equal(manager.tabId, null);
 
-  // A committed navigation: the tab's url changes, which is what onUpdated
-  // reports and what the next query will see.
   await fake.navigate(1, 'https://a.test/');
   assert.equal(manager.tabId, 1);
 });
@@ -207,6 +260,7 @@ test('a failing query is logged and leaves the previous state intact', async () 
     onCreated: { addListener: () => {} },
     onRemoved: { addListener: () => {} },
     onUpdated: { addListener: () => {} },
+    onReplaced: { addListener: () => {} },
   };
   const manager = createWorkTabManager({
     tabs,
@@ -217,4 +271,128 @@ test('a failing query is logged and leaves the previous state intact', async () 
 
   assert.equal(manager.tabId, null);
   assert.equal(warnings.length, 1);
+});
+
+test('a replaced tab does not leave a stale binding behind', async () => {
+  // Prerendering hands the tab identity to a new id and Chrome fires onReplaced
+  // instead of a create/remove pair.
+  const fake = createFakeTabs([web(1, 'https://a.test/')]);
+  const manager = createWorkTabManager({ tabs: fake.api });
+
+  await manager.refresh('worker-start');
+  assert.equal(manager.tabId, 1);
+
+  await fake.replaceTab(web(2, 'https://a.test/'), 1);
+
+  assert.equal(manager.tabId, 2, '必须指向替换后的 tabId');
+});
+
+test('a replacement that leaves no ordinary tab reports WORK_TAB_CLOSED', async () => {
+  const fake = createFakeTabs([web(1, 'https://a.test/')]);
+  const manager = createWorkTabManager({ tabs: fake.api });
+
+  await manager.refresh('worker-start');
+  await fake.replaceTab(browser(2, 'chrome://settings/'), 1);
+
+  assert.equal(manager.tabId, null);
+  assert.equal(manager.reason, WORK_TAB_REASONS.WORK_TAB_CLOSED);
+});
+
+test('an out-of-order query result is discarded', async () => {
+  const fake = createFakeTabs([web(1), web(2)], { manual: true });
+  const manager = createWorkTabManager({ tabs: fake.api });
+
+  // Two overlapping refreshes, as rapid tab events would produce.
+  const older = manager.refresh('older');
+  await settle();
+  fake.setTabs([web(1)]); // the second tab closed in between
+  const newer = manager.refresh('newer');
+  await settle();
+  assert.equal(fake.pendingQueryCount(), 2);
+
+  // The newer query answers first, then the older one arrives with a snapshot
+  // that is already obsolete.
+  fake.resolveQuery(1, [web(1)]);
+  fake.resolveQuery(0, [web(1), web(2)]);
+  await Promise.all([older, newer]);
+
+  assert.equal(manager.tabId, 1, '陈旧快照不得覆盖更新的结果');
+  assert.equal(manager.reason, null);
+});
+
+test('a closure is still published when the follow-up query fails', async () => {
+  const fake = createFakeTabs([web(5)]);
+  const recorder = createRecorder();
+  const manager = createWorkTabManager({ tabs: fake.api, onChange: recorder.onChange });
+
+  await manager.refresh('worker-start');
+  fake.failQueries();
+  await fake.removeTab(5);
+
+  assert.equal(
+    recorder.seen.at(-1).reason,
+    WORK_TAB_REASONS.WORK_TAB_CLOSED,
+    '查询失败不应吞掉已经发生的关闭',
+  );
+});
+
+test('a binding restored after worker suspension recognises the closure', async () => {
+  // The worker was suspended with tab 5 bound; Chrome wakes it to deliver the
+  // removal, so its in-memory binding is gone and only the persisted id remains.
+  const fake = createFakeTabs([]);
+  const binding = createMemoryBinding({ tabId: 5, boundTabWasClosed: false });
+  const manager = createWorkTabManager({ tabs: fake.api, binding });
+
+  await fake.emitRemoved(5);
+
+  assert.equal(manager.tabId, null);
+  assert.equal(
+    manager.reason,
+    WORK_TAB_REASONS.WORK_TAB_CLOSED,
+    '恢复的绑定必须能识别出被关闭的 Work Tab',
+  );
+});
+
+test('a restored closed-flag keeps the reason specific', async () => {
+  const fake = createFakeTabs([]);
+  const binding = createMemoryBinding({ tabId: null, boundTabWasClosed: true });
+  const manager = createWorkTabManager({ tabs: fake.api, binding });
+
+  await manager.refresh('worker-start');
+
+  assert.equal(manager.reason, WORK_TAB_REASONS.WORK_TAB_CLOSED);
+});
+
+test('the binding is persisted after each evaluation', async () => {
+  const fake = createFakeTabs([web(4)]);
+  const binding = createMemoryBinding(null);
+  const manager = createWorkTabManager({ tabs: fake.api, binding });
+
+  await manager.refresh('worker-start');
+  await settle();
+
+  assert.deepEqual(binding.writes.at(-1), { tabId: 4, boundTabWasClosed: false });
+});
+
+test('a failing binding read or write never breaks the manager', async () => {
+  const fake = createFakeTabs([web(6)]);
+  const warnings = [];
+  const manager = createWorkTabManager({
+    tabs: fake.api,
+    binding: {
+      read: async () => {
+        throw new Error('session storage unavailable');
+      },
+      write: async () => {
+        throw new Error('session storage unavailable');
+      },
+    },
+    logger: { info: () => {}, warn: (...args) => warnings.push(args) },
+  });
+
+  await assert.doesNotReject(() => manager.refresh('worker-start'));
+  await settle();
+
+  assert.equal(manager.tabId, 6, '持久化失败不应影响内存中的绑定');
+  assert.ok(warnings.length >= 2, '读取与写入失败都应记录');
 });
