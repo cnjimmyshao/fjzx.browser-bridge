@@ -17,6 +17,7 @@ import {
   normalizeTargetUrl,
   normalizeTopLevelSite,
   resolvePartitionKey,
+  siteMatchPattern,
 } from '../src/lib/request-context.js';
 import { USER_AGENT_SOURCES, createRequestContextSource, supportsAncestorBit } from '../src/lib/request-context-source.js';
 import { parseServiceMessage } from '../src/lib/protocol.js';
@@ -405,6 +406,7 @@ function createStubChrome({
   tabMissing = false,
   denyTargetAccess = false,
   withPermissionsApi = true,
+  grantedOrigins = null,
   cookieStores = [{ id: '0', tabIds: [1] }],
   failCookieStores = false,
 } = {}) {
@@ -451,7 +453,11 @@ function createStubChrome({
     stub.permissions = {
       async contains({ origins }) {
         calls.contains.push(origins);
-        return !denyTargetAccess;
+        if (denyTargetAccess) return false;
+        // `grantedOrigins` models a user who allowed some sites only; by default the
+        // extension's `<all_urls>` grant answers yes to everything asked.
+        if (grantedOrigins === null) return true;
+        return origins.every((pattern) => grantedOrigins.includes(pattern));
       },
     };
   }
@@ -740,10 +746,10 @@ test('withheld access to a cross-origin target is reported, not answered with an
   assert.equal(refused.ok, false);
   assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
   assert.match(refused.message, /没有访问权限/);
-  assert.deepEqual(denied.calls.contains, [['https://cdn.test/*']]);
+  assert.deepEqual(denied.calls.contains, [['https://cdn.test/*', '*://*.cdn.test/*']]);
   assert.deepEqual(denied.calls.getAll, [], '越权时不应再读 cookie');
 
-  // Granted access asks the same question and proceeds.
+  // Granted access asks the same questions and proceeds.
   const granted = createStubChrome({ cookies: [{ name: 'sid', value: 's', path: '/' }] });
   const allowed = await createSource(granted).read({
     tabId: 1,
@@ -751,13 +757,54 @@ test('withheld access to a cross-origin target is reported, not answered with an
     scope: TARGET_SCOPES.TARGET_ONLY,
   });
   assert.equal(allowed.ok, true);
-  assert.deepEqual(granted.calls.contains, [['https://cdn.test/*']]);
+  assert.deepEqual(granted.calls.contains, [['https://cdn.test/*', '*://*.cdn.test/*']]);
 
   // Without the API the check is skipped rather than guessed, and the answer is
   // still produced (documented: the result says nothing about access).
   const noApi = createStubChrome({ withPermissionsApi: false });
   const skipped = await createSource(noApi).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
   assert.equal(skipped.ok, true);
+});
+
+test('access to the target origin alone is not enough for a parent-domain cookie', async () => {
+  // Host permissions are checked per cookie: with `app.example.com` allowed but the
+  // site wildcard not, a `Domain=.example.com` cookie matching the target is dropped
+  // without a trace, so an "ok" here would be a completeness claim Bridge cannot back.
+  const stub = createStubChrome({
+    cookies: [{ name: 'sid', value: 's', path: '/' }],
+    grantedOrigins: ['https://app.example.com/*'],
+    tabUrl: 'https://app.example.com/feed',
+  });
+  const refused = await createSource(stub).read({ tabId: 1, targetUrl: 'https://app.example.com/media/1' });
+
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+  assert.match(refused.message, /没有访问权限/);
+  assert.deepEqual(stub.calls.contains, [['https://app.example.com/*', '*://*.example.com/*']]);
+  assert.deepEqual(stub.calls.getAll, []);
+
+  // With the site covered, the same request goes through.
+  const pageFacts = { userAgent: 'PageUA/1.0', documentReferrer: '', referrerPolicy: null, pageUrl: 'https://app.example.com/feed' };
+  const covered = createStubChrome({
+    cookies: [{ name: 'sid', value: 's', path: '/' }],
+    grantedOrigins: ['https://app.example.com/*', '*://*.example.com/*'],
+    tabUrl: 'https://app.example.com/feed',
+    pageFacts,
+  });
+  const allowed = await createSource(covered).read({ tabId: 1, targetUrl: 'https://app.example.com/media/1' });
+  assert.equal(allowed.ok, true);
+  assert.equal(allowed.context.cookieCount, 1);
+});
+
+test('siteMatchPattern covers the domains a URL can carry', () => {
+  // A subdomain target can carry a cookie for the parent domain, which the wildcard
+  // asks about; `*.example.com` also covers the bare domain.
+  assert.equal(siteMatchPattern('https://app.example.com/media/1?sign=x'), '*://*.example.com/*');
+  assert.equal(siteMatchPattern('https://example.com/x'), '*://*.example.com/*');
+  // IP literals and single-label hosts have no parent domain to cover.
+  assert.equal(siteMatchPattern('http://127.0.0.1:8080/x'), '*://127.0.0.1/*');
+  assert.equal(siteMatchPattern('http://localhost:8080/x'), '*://localhost/*');
+  assert.equal(siteMatchPattern('http://[::1]:8080/x'), '*://::1/*'.replace('::1', '[::1]'));
 });
 
 test('an unscriptable page is an error, not a context with the worker user agent', async () => {

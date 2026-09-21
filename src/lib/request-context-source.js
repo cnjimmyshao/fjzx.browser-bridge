@@ -10,6 +10,7 @@ import {
   normalizeScope,
   normalizeTargetUrl,
   resolvePartitionKey,
+  siteMatchPattern,
 } from './request-context.js';
 
 /**
@@ -174,23 +175,25 @@ export function createRequestContextSource(options = {}) {
   }
 
   /**
-   * Does the extension still have access to this origin?
+   * Does the extension have the host access this target needs?
    *
-   * `chrome.cookies.getAll` filters **silently** by host permission, so with site
-   * access withheld it answers "no cookies" instead of failing — and for a
-   * cross-origin target the Work Tab's own access says nothing about the target's.
-   * Asking explicitly is the only way to tell "this URL has no cookies" from "we
-   * are not allowed to see them". When the API is not injected the check is skipped
-   * and the answer says nothing about access.
+   * `chrome.cookies.getAll` filters **silently** and **per cookie**, so two different
+   * questions matter: the target origin (nothing is visible without it) and the
+   * target's site wildcard, without which a matching parent-domain cookie
+   * (`Domain=.example.com` for `app.example.com`) is dropped without a trace. Both
+   * are asked before any read, so a target whose access was withheld is reported
+   * rather than answered with an incomplete set. When the API is not injected the
+   * checks are skipped and the answer says nothing about access.
    */
-  async function hasHostAccess(origin) {
+  async function hasHostAccess(origin, pattern) {
     const { permissions } = resolveApis();
     if (typeof permissions?.contains !== 'function') return { ok: true, verified: false };
+    const origins = pattern === undefined || pattern === `${origin}/*` ? [`${origin}/*`] : [`${origin}/*`, pattern];
     try {
-      const granted = await permissions.contains({ origins: [`${origin}/*`] });
-      return { ok: granted === true, verified: true };
+      const granted = await permissions.contains({ origins });
+      return { ok: granted === true, verified: true, origins };
     } catch (error) {
-      return { ok: false, verified: true, kind: describeErrorKind(error) };
+      return { ok: false, verified: true, origins, kind: describeErrorKind(error) };
     }
   }
 
@@ -256,14 +259,15 @@ export function createRequestContextSource(options = {}) {
     });
     if (!partition.ok) return fail(CONTEXT_ERROR_CODES.INVALID_PARTITION, partition.reason);
 
-    // Access is per origin, so a cross-origin target needs its own check: the Work
-    // Tab being scriptable says nothing about whether the CDN's cookies are visible.
+    // Access is per cookie, not per origin: the work tab being scriptable says
+    // nothing about the target, and the target origin being covered says nothing
+    // about the parent-domain cookies it can also carry.
     const targetOrigin = new URL(target.url).origin;
-    const access = await hasHostAccess(targetOrigin);
+    const access = await hasHostAccess(targetOrigin, siteMatchPattern(target.url));
     if (!access.ok) {
       return fail(
         CONTEXT_ERROR_CODES.CONTEXT_FAILED,
-        `扩展对目标站点没有访问权限（${targetOrigin}），无法保证 cookie 集合完整${access.kind === undefined ? '。' : `（${access.kind}）`}`,
+        `扩展对目标站点没有访问权限（${access.origins.join(' + ')}），无法保证 cookie 集合完整${access.kind === undefined ? '。' : `（${access.kind}）`}`,
       );
     }
 

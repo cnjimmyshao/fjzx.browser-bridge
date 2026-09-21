@@ -220,6 +220,26 @@ export function isSameSite(a, b) {
 }
 
 /**
+ * The match pattern that covers every cookie domain a URL can carry.
+ *
+ * Host permissions are checked **per cookie**, not per query: a `Domain=.example.com`
+ * cookie matching `app.example.com` is dropped unless the extension also has access
+ * to the parent domain. Asking only about the target origin would therefore accept a
+ * set that is silently missing those cookies, so callers check this pattern too. For
+ * a subdomain it is the site wildcard (`*://*.example.com/*`, which also covers the
+ * bare domain); for an IP literal or a single-label host there is no parent domain to
+ * cover.
+ *
+ * @param {string} url
+ */
+export function siteMatchPattern(url) {
+  const { hostname } = new URL(url);
+  const isIpLiteral = hostname.includes(':') || /^\d+(\.\d+){3}$/.test(hostname);
+  if (isIpLiteral || !hostname.includes('.')) return `*://${hostname}/*`;
+  return `*://*.${siteHost(hostname)}/*`;
+}
+
+/**
  * Pick the **one** CHIPS partition a replayed request belongs to.
  *
  * A partition key is not just the top-level site: since Chrome 130 it also carries

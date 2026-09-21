@@ -60,9 +60,9 @@ issue 的硬约束是 Bridge 不得理解 Douyin / Media / Video / Work。POC �
 | 7 | 哪些 Header 能可靠取得/重建 | 能重建：`User-Agent`、`Accept`、`Accept-Encoding`、`Accept-Language`、`Referer`、`Origin`、`sec-ch-ua*`、`Sec-Fetch-*`、`Range`、`Priority` | 【实测】POC 捕获了 Chrome 153 的真实请求头，见 [§7.3](#73-浏览器真实请求头实测chrome-153) |
 | 8 | 哪些 Header 是浏览器生成、不该导出 | TLS 指纹、HTTP/2 伪头与 SETTINGS、header 顺序、`Host`、HTTP/3；另有 `DNT`/`Connection` 等"设了反而异常"的项 | 【文档】[02 §2/§6](notes/02-replay-context.md) |
 | 9 | SameSite / Secure / Partitioned 影响 | SameSite **不影响读取**（只影响浏览器发送，POC 实测 `SameSite=Strict` cookie 照样返回）；Secure 需与目标 URL 的 scheme 一致（localhost 有例外，POC 里 `http://localhost` 查询拿到了 `Secure` cookie）；**Partitioned 必须显式指定分区，否则返回空** | 【实测】三条检查 + [01 §6/§7/§9](notes/01-cookie-api.md) |
-| 10 | 需要哪些 permissions / host_permissions | `permissions: ["cookies"]`（不新增警告文案）；host permissions **逐域**限制读取范围 | 【文档】[01 §3](notes/01-cookie-api.md)；【实测】POC 用 `cookies`+`scripting`+`tabs`+`storage` 跑通 |
+| 10 | 需要哪些 permissions / host_permissions | `permissions` 增量为 **`cookies` + `scripting`**（前者不新增警告文案，后者用于读页面自身的 UA/referrer）；host permissions **逐域**限制读取范围 | 【文档】[01 §3](notes/01-cookie-api.md)；【实测】POC 用 `cookies`+`scripting`+`tabs`+`storage` 跑通 |
 | 11 | 当前 Bridge 已具备哪些能力 | Work Tab 身份（`tabId`）现成，但**运行期从不持有 URL**（只在判定与导航时用），取 URL 要在请求时刻 `chrome.tabs.get`；`storage.session` 只存 `{rememberedTabId, boundTabWasClosed}`；`isJsonCompatible` 只在 EXECUTE 路径校验；错误码只有 3 个 | 【文档】[03 §1/§2](notes/03-bridge-gaps.md)（带 `文件:行号`） |
-| 12 | 最小新增能力是什么 | 一条只读短请求 + 一个纯逻辑模块 + 一个权限；**不碰** `ERROR_CODES`、`isJsonCompatible`、Job 状态机语义 | [§6](#6-最小改动面与方案对比)、[§8](#8-protocol-draft非稳定契约) |
+| 12 | 最小新增能力是什么 | 一条只读短请求 + 两个纯逻辑模块 + **两个权限**（`cookies` + `scripting`）；**不碰** `ERROR_CODES`、`isJsonCompatible`、Job 状态机语义 | [§6](#6-最小改动面与方案对比)、[§8](#8-protocol-draft非稳定契约) |
 
 ---
 
@@ -277,7 +277,7 @@ cookie: sid=…; theme=…; strict=…
 | `INVALID_SCOPE` | `scope` 既不是 `WORK_TAB_ORIGIN` 也不是 `TARGET_ONLY` | 拒绝而不是静默按默认处理 |
 | `INVALID_PARTITION` | `topLevelSite` 不是合法 URL，或 `hasCrossSiteAncestor` 不是 boolean | `topLevelSite: null` 也不豁免 boolean 校验 |
 | `TARGET_OUT_OF_SCOPE` | 默认 scope 下 targetUrl 与 Work Tab 不同源 | 此时**不会**触碰 cookie API |
-| `CONTEXT_FAILED` | `chrome.cookies` 调用失败、页面读不到（站点访问受限）、**目标站点访问权限被撤下**、cookie store 无法确定、上下文不可序列化、**采样期间 Work Tab 发生了导航**（重试一次后仍不一致）| |
+| `CONTEXT_FAILED` | `chrome.cookies` 调用失败、页面读不到（站点访问受限）、**目标站点访问权限被撤下（含父域覆盖）**、cookie store 无法确定、上下文不可序列化、**采样期间 Work Tab 发生了导航**（重试一次后仍不一致）| |
 
 **错误信息里的禁忌**：浏览器 API 的错误文本可能原样带上被查询的 URL（`chrome.scripting` 的拒绝消息就可能包含整条页面 URL，含签名参数），因此凡是"被交过 URL 的 API"失败，返回与日志里**只报错误类型**（`Error` 之类）与不含查询串的 origin，绝不转发原文。
 
