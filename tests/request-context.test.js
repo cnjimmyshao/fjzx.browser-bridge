@@ -293,17 +293,26 @@ test('resolvePartitionKey always names exactly one partition', () => {
     { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
   );
 
-  // An explicit site is accepted when it **is** the Work Tab's own site (a caller can
-  // name it for clarity) …
+  // An explicit site is accepted when it **is** the Work Tab's own origin (the value the
+  // default derives anyway) …
   assert.deepEqual(
     resolvePartitionKey({ targetUrl: 'https://app.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'https://app.test/other' }).partitionKey,
     { topLevelSite: WORK_TAB_ORIGIN, hasCrossSiteAncestor: false },
   );
-  // … and refused when it is a foreign site: that would fetch a partition belonging to
-  // a page this Work Tab never was, and pair it with this page's Referer and UA.
-  const foreign = resolvePartitionKey({ targetUrl: 'https://app.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: 'https://bank.test' });
-  assert.equal(foreign.ok, false);
-  assert.match(foreign.reason, /Work Tab 所在站点/);
+  // … and refused for anything else. Judging "same site" would need a public suffix
+  // list: without one `evil.co.uk` and `app.bank.co.uk` look like one site, which would
+  // hand over a partition this Work Tab was never under.
+  for (const foreign of ['https://bank.test', 'https://evil.co.uk', 'https://app.test:8443']) {
+    const refused = resolvePartitionKey({ targetUrl: 'https://app.test/a', workTabUrl: WORK_TAB_URL, topLevelSite: foreign });
+    assert.equal(refused.ok, false, `${foreign} 不应被接受`);
+    assert.match(refused.reason, /Work Tab 自身的 origin/);
+  }
+  const multiLabel = resolvePartitionKey({
+    targetUrl: 'https://app.bank.co.uk/a',
+    workTabUrl: 'https://app.bank.co.uk/feed',
+    topLevelSite: 'https://evil.co.uk',
+  });
+  assert.equal(multiLabel.ok, false, '多段公共后缀不得让外来站点蒙混过关');
 
   assert.equal(resolvePartitionKey({ targetUrl: 'https://cdn.test/a', workTabUrl: WORK_TAB_URL, hasCrossSiteAncestor: 'yes' }).ok, false);
   // The opt-out does not excuse a malformed bit: rejecting beats reinterpreting.

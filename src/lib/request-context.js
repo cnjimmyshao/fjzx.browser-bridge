@@ -274,17 +274,23 @@ export function resolvePartitionKey(input) {
 
   if (input.topLevelSite === null) return { ok: true, partitionKey: null };
 
-  // A context describes a request the Work Tab could itself make, so the partition can
-  // only be that page's own top-level site. A supplied site that is *not* that site
-  // would combine a foreign partition's cookies with this page's Referer and user
-  // agent — a combination Chrome would never send — so it is refused rather than
-  // honoured. Comparing schemeful sites (not origins) matches what a partition key
-  // holds, and lets a caller name the site explicitly for clarity.
-  if (input.topLevelSite !== undefined && !isSameSite(input.topLevelSite, input.workTabUrl)) {
-    return {
-      ok: false,
-      reason: `topLevelSite 必须是 Work Tab 所在站点（${new URL(input.workTabUrl).origin}），不能指定其它站点的分区。`,
-    };
+  // A context describes a request the Work Tab could itself make, so the partition is
+  // that page's own top-level site. Only that origin is accepted when a caller spells
+  // it out: judging "same site" would need a public suffix list, and without one
+  // `evil.co.uk` and `app.bank.co.uk` look like a single site — which would hand over a
+  // partition this page was never under. The field has two useful values (omitted =
+  // derived, `null` = no partition query), so anything else is refused rather than
+  // approximated.
+  if (input.topLevelSite !== undefined) {
+    const supplied = normalizeTopLevelSite(input.topLevelSite);
+    if (!supplied.ok) return { ok: false, reason: supplied.reason };
+    const workTabOrigin = new URL(input.workTabUrl).origin;
+    if (supplied.topLevelSite !== workTabOrigin) {
+      return {
+        ok: false,
+        reason: `topLevelSite 只能是 Work Tab 自身的 origin（${workTabOrigin}）或 null；省略即表示使用它。`,
+      };
+    }
   }
 
   const site = normalizeTopLevelSite(
