@@ -277,18 +277,23 @@ POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-e
 
 ```json
 { "type": "GET_REQUEST_CONTEXT", "requestId": "rc-1", "targetUrl": "https://cdn.example/media/1?sign=…",
-  "scope": "WORK_TAB_ORIGIN", "topLevelSite": "https://www.example", "hasCrossSiteAncestor": true }
+  "scope": "TARGET_ONLY", "hasCrossSiteAncestor": true }
 ```
+
+这个示例的前提是 **Work Tab 在 `https://www.example`**：目标是跨源 CDN，因此必须显式声明 `TARGET_ONLY`（默认的 `WORK_TAB_ORIGIN` 只服务与 Work Tab 同源的目标）；`topLevelSite` 省略即表示取 Work Tab 自己的 origin，显式给出时**只能是该 origin**，或传 `null` 表示不做分区查询。
 
 ```json
 { "type": "REQUEST_CONTEXT", "requestId": "rc-1", "ok": true, "context": {
   "targetUrl": "…", "targetOrigin": "…", "scope": "…", "observedAt": "2026-01-01T00:00:00.000Z",
   "cookieHeader": "…", "cookieCount": 2, "httpOnlyCookieCount": 1, "partitionedCookieCount": 0,
+  "exactPartitionSelection": true, "hostAccessCoverage": "all", "duplicateCookieNames": [],
   "cookies": [{ "name": "…", "domain": "…", "path": "/", "secure": true, "httpOnly": true,
                 "sameSite": "lax", "session": true, "partitioned": false, "topLevelSite": null }],
   "userAgent": "…", "userAgentSource": "work-tab-page", "serviceWorkerUserAgent": "…",
   "referer": "…", "workTabUrl": "…", "documentReferrer": "…", "referrerPolicy": null } }
 ```
+
+`exactPartitionSelection`、`hostAccessCoverage` 与 `duplicateCookieNames` **总是出现**，而且不是装饰：它们是"分区是否精确、权限是否可能过滤掉父域 cookie、header 顺序是否可信"的唯一信号，Service 不应把它们当作可忽略的附加字段。
 
 失败时 `ok:false` + `error:{code,message}`，code 只有：`NOT_READY`、`INVALID_TARGET_URL`、`INVALID_SCOPE`、`INVALID_PARTITION`、`TARGET_OUT_OF_SCOPE`、`CONTEXT_FAILED`。
 

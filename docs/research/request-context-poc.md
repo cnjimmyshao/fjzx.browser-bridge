@@ -22,7 +22,7 @@
 1. **技术上可行，而且不需要任何"业务语义"。**【实测】MV3 扩展用 `chrome.cookies.getAll({ url })` 能拿到**HttpOnly** cookie（页面 JS 与 USER_SCRIPT world 都拿不到），把它拼成 `Cookie` 头交给 Node 后，Node 用普通 `fetch` 成功下载了与浏览器**逐字节相同**（SHA-256 一致）的受 Session 保护资源。
 2. **权限增量是两个：`cookies` 与 `scripting`。**【文档】`"cookies"` 不产生额外安装警告文案；读取范围逐域受 `host_permissions` 限制；`getAll({url})` 由**浏览器自己**决定"哪些 cookie 适用于该 URL"，Bridge 从不需要枚举 cookie 库。`scripting` 用于读 Work Tab **页面自己**的 UA 与 `document.referrer`——实测页面级 UA 覆盖在页面里可见、在 service worker 里不可见，worker 代答不了（用户脚本被禁用时也一样，所以不能借用 `userScripts` 通道）。
 3. **但有三条必须承认的边界**，任何实现与验收标准都要写进去：
-   - **CHIPS 分区 cookie**：不指定 `partitionKey` 时 `getAll({url})` **一个都不返回**（【实测】同一 URL：不带 partition 查询 0 个，带 `topLevelSite` 才看到那个 `Partitioned` cookie，而浏览器确实在跨站请求里发了它）。所以"分区"必须由调用方说明。
+   - **CHIPS 分区 cookie**：不指定 `partitionKey` 时 `getAll({url})` **一个都不返回**（【实测】同一 URL：不带 partition 查询 0 个，带 `topLevelSite` 才看到那个 `Partitioned` cookie，而浏览器确实在跨站请求里发了它）。因此分区键必须完整：顶层站点默认取 Work Tab 的 origin、`hasCrossSiteAncestor` 由 Bridge 推导（调用方也可显式覆盖这一位），调用方想关掉分区查询只能显式传 `topLevelSite: null`。
    - **UA / Referer / 其它头**：Bridge 只能给"页面自陈的事实"。**权威 UA 必须从 Work Tab 页面读**（【实测】页面级 UA 覆盖后：页面报 `RequestContextPOC/9.9`，扩展 service worker 仍报浏览器默认 UA）。
    - **传输层指纹无法重建**：TLS（JA3/JA4）、HTTP/2 帧与 header 顺序、HTTP/3、连接复用都不在 Node 普通 HTTP 客户端能力内（[02 §6](notes/02-replay-context.md)）。有指纹风控的靶站**不作为 POC 承诺**。
 4. **需求侧证据与直觉相反，这是本次调研最重要的发现。**现役 Service（`pr-douyin`）**不发 Cookie、不设 UA、只写死一个 Referer**，就已经跑通视频/图集/音频/表情四类媒体；真正卡住它的是**签名 URL 约 3 小时过期后只能回浏览器重新观察**，以及**浏览器出口与后端出口不一致时无任何实现**（[04](notes/04-service-side-need.md)）。因此：
@@ -214,11 +214,12 @@ cookie: sid=…; theme=…; strict=…
   "type": "GET_REQUEST_CONTEXT",
   "requestId": "rc-1",
   "targetUrl": "https://cdn.example.test/media/1?sign=…",
-  "scope": "WORK_TAB_ORIGIN",
-  "topLevelSite": "https://www.example.test",
+  "scope": "TARGET_ONLY",
   "hasCrossSiteAncestor": true
 }
 ```
+
+（示例前提：Work Tab 在 `https://www.example.test`。跨源目标必须显式给 `TARGET_ONLY`；`topLevelSite` 省略即取 Work Tab 的 origin。）
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
