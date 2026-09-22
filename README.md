@@ -105,8 +105,12 @@ src/                      Extension 根目录，Chrome 直接加载此目录
   options/                Options 设置页
 tests/                    node:test 自动化测试
   helpers/ws-server.js    最小 WebSocket 测试服务器（零依赖，仅测试用）
-  poc/                    端到端 POC：测试 Service、测试页面、场景运行器
+  poc/                    端到端 POC harness（零依赖）
+    run-poc.mjs           V1：12 个场景，跑 src/ 真扩展 + mock Service
+    request-context.mjs   请求上下文：15 个场景，同样跑 src/ 真扩展
+    protected-server.mjs  受 Session 保护的本地源站（Cookie + Referer + UA）
 docs/architecture-v1.md   V1 架构与协议
+docs/research/            issue #13 的调查报告与调研笔记
 ```
 
 `src/` 就是 Extension 根目录，**没有打包步骤**：Chrome 直接加载 `src/`，因此 `tests/`、`docs/`、`package.json` 不会进入 Extension。
@@ -135,6 +139,14 @@ npm run poc         # 等价于 node tests/poc/run-poc.mjs
 ```
 
 它会自动完成：启动本地测试页面服务器 → 启动最小测试 Service → 启动 Chrome 并加载 `src/` → 在扩展详情页打开 **Allow User Scripts** → 通过真实的设置页保存 Service URL → 依次执行 #7 列出的 12 个场景 → 打印结果并以退出码反映成败。
+
+**4. 跑请求上下文的端到端 POC**（issue #13，同样跑 `src/` 真扩展）：
+
+```powershell
+npm run poc:context # 等价于 node tests/poc/request-context.mjs
+```
+
+它会另起一个受 Session 保护的本地源站（只有 `Cookie` + `Referer` + `User-Agent` 三者齐全才返回数据），驱动真扩展取上下文，再由 Node 用该上下文重放下载，并逐条验证反例（缺 Cookie → 401、缺 Referer → 403）、跨源 scope、分区 Cookie、UA 权威来源与"不落盘"。
 
 ```text
   ✔ 1. 首次配置 Service URL 并连接
@@ -188,7 +200,9 @@ Bridge 不会创建、关闭、恢复或重排任何 Tab，也不记住 Initial 
 | `storage` | 唯一持久配置 Service URL；Work Tab 绑定存于 `storage.session` |
 | `tabs` | 读取 `tab.url` 与 `changeInfo.url`。host 权限覆盖不了 `chrome://`，没有它时 Work Tab 导航到浏览器页面会被漏掉、继续被当成已绑定（实测） |
 | `userScripts` | 在 Work Tab 的 USER_SCRIPT world 执行 Service JavaScript |
-| `host_permissions: <all_urls>` | `execute()` 要求扩展对目标标签页有 host 权限（实测），否则拒绝执行 |
+| `cookies` | 实验性请求上下文（issue #13）：读**与该 URL 匹配的存储中的 cookie**（含 HttpOnly）。注意这**不是**"浏览器此刻会发送的集合"——SameSite 与第三方拦截不参与读取。只用 `getAll({url})`，永不枚举整个 cookie 库；`cookies` 本身不新增权限警告文案 |
+| `scripting` | 同一能力：读 Work Tab **页面自己**的 `navigator.userAgent` 与 `document.referrer`。实测页面级 UA 覆盖在页面里可见、在 service worker 里不可见，因此 worker 无法代答 |
+| `host_permissions: <all_urls>` | `execute()` 要求扩展对目标标签页有 host 权限（实测）；`chrome.cookies` 的读取范围也逐域受它限制 |
 
 没有 `optional_permissions`，也没有 content script。`<all_urls>` **不指向任何具体站点**：所有站点一视同仁，manifest 里不编码任何平台知识，因此 Bridge 仍然是"无业务语义"的。
 
@@ -222,6 +236,19 @@ MV3 service worker **不是常驻进程**。实测（Chrome for Testing 153.0.80
 这意味着「Service 随时 push EXECUTE」这一前提需要额外机制才能成立，V1 架构文档尚未覆盖。详见 issue #9。
 
 > 当前行为：worker 被唤醒时会重新读取 Service URL 并重连，因此 Options 页保存配置、浏览器启动等事件都会触发恢复。
+
+## 调研：受控 Request Context（issue #13）
+
+issue #13 的调研、POC，以及**按维护者要求做进真扩展的实验性实现**。它不改变 V1 的四种消息与三个错误码：
+
+- 调查报告：[docs/research/request-context-poc.md](docs/research/request-context-poc.md)（含最小 Protocol Draft，**未声明为稳定契约**）
+- 调研笔记：`docs/research/notes/`（Cookie API、重放上下文、Bridge 差距、Service 侧需求、Node 重放忠实度）
+- 真实实现：`src/lib/request-context.js`（纯逻辑）+ `src/lib/request-context-source.js`（可注入的 `chrome.cookies` / `tabs` / `scripting` 适配）+ `bridge-state.js` 里一条**不占 Job 槽**的短路径
+- 端到端验证：`npm run poc:context`（等价 `node tests/poc/request-context.mjs`）——在**真扩展**上跑 15 个场景，含反例；证据写在 `docs/research/evidence/request-context.json`
+
+`GET_REQUEST_CONTEXT` / `REQUEST_CONTEXT` 是**新增的一对实验性消息**（架构文档 §14），错误码自成一套（`NOT_READY` / `INVALID_TARGET_URL` / `INVALID_SCOPE` / `INVALID_PARTITION` / `TARGET_OUT_OF_SCOPE` / `CONTEXT_FAILED`），删掉它不会影响 V1 的任何行为。是否冻结、是否保留 `cookies` + `scripting` 权限，都还留给评审决定。
+
+实测事实（Chrome for Testing 153）：`chrome.cookies.getAll({url})` 能拿到 **HttpOnly** cookie（页面 JS 看不到）；**它给的是"存储中匹配该 URL 的 cookie 全集"，不是"浏览器此刻会发送的集合"**——SameSite 与第三方拦截都不参与读取；**分区（CHIPS）cookie 必须给出完整分区键**——只给顶层站点会同时命中 `hasCrossSiteAncestor` 的两种取值，实测同一 URL 两位互不包含（默认按 schemeful site 推导出正确的那一位）；页面级 UA 覆盖后上下文跟随页面；全程不落盘、日志里没有 cookie 值。
 
 ## 开发
 

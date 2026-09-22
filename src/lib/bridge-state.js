@@ -1,12 +1,15 @@
 import {
   ERROR_CODES,
   SERVICE_MESSAGE_TYPES,
+  createRequestContextError,
+  createRequestContextOk,
   createResultError,
   createResultOk,
   createStatus,
   isJsonCompatible,
   parseServiceMessage,
 } from './protocol.js';
+import { CONTEXT_ERROR_CODES } from './request-context.js';
 
 /**
  * Bridge's current technical state, and the single Job it may be running.
@@ -58,11 +61,22 @@ function describeError(error) {
  *   connection: {send: (text: string) => boolean},
  *   workTab: {isBound: boolean, tabId: number | null, reason: string | null},
  *   executor: {execute: (job: {tabId: number, script: string, input: unknown}) => Promise<unknown>},
+ *   requestContext?: {
+ *     isAvailable: () => boolean,
+ *     read: (request: {tabId: number, targetUrl: unknown, scope?: unknown, topLevelSite?: unknown}) => Promise<object>,
+ *   },
  *   onStateChange?: (state: string) => void,
  *   logger?: {info?: Function, warn?: Function},
  * }} options
  */
-export function createBridgeState({ connection, workTab, executor, onStateChange, logger = {} }) {
+export function createBridgeState({
+  connection,
+  workTab,
+  executor,
+  requestContext,
+  onStateChange,
+  logger = {},
+}) {
   if (!connection || typeof connection.send !== 'function') {
     throw new TypeError('createBridgeState 需要一个实现 send 的 connection。');
   }
@@ -141,21 +155,150 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
   }
 
   /**
-   * Answer the Service that submitted the Job — and only that one.
+   * Answer the Service that asked — and only that one.
    *
-   * A Job outlives the connection it arrived on: the operator may repoint the
-   * Service URL while it runs, in which case the replacement Service must not
-   * receive page data for a Job it never submitted. V1 has no cancellation, so
-   * the Job still finishes; the RESULT simply has nowhere to go.
+   * A request outlives the connection it arrived on: the operator may repoint the
+   * Service URL while it is being served, in which case the replacement Service
+   * must not receive page data it never asked for. The work still finishes; the
+   * answer simply has nowhere to go.
    */
-  function sendResultFor(job, message) {
-    if (connection.url !== job.originUrl) {
+  function sendToOrigin(originUrl, subject, message) {
+    if (connection.url !== originUrl) {
       logger.warn?.(
-        `[bridge] dropped ${message.type} for ${job.jobId}: the endpoint changed while it ran`,
+        `[bridge] dropped ${message.type} for ${subject}: the endpoint changed while it ran`,
       );
       return;
     }
     send(message);
+  }
+
+  function sendResultFor(job, message) {
+    sendToOrigin(job.originUrl, job.jobId, message);
+  }
+
+  /**
+   * Why a context request cannot be served, or null when it can.
+   *
+   * Deliberately *narrower* than `notReadyReason()`: reading cookies and the
+   * page's own facts never runs Service JavaScript, so an operator who has not
+   * granted "Allow User Scripts" can still be told what the browser would send.
+   * Conflating the two would take a capability away for an unrelated reason.
+   */
+  function contextNotReadyReason() {
+    if (!workTab.isBound) return workTab.reason;
+    if (requestContext === undefined || requestContext === null) return 'CONTEXT_UNAVAILABLE';
+    if (typeof requestContext.read !== 'function') return 'CONTEXT_UNAVAILABLE';
+    if (typeof requestContext.isAvailable === 'function' && !requestContext.isAvailable()) {
+      return 'CONTEXT_UNAVAILABLE';
+    }
+    return null;
+  }
+
+  /**
+   * Serve one `GET_REQUEST_CONTEXT`.
+   *
+   * This runs **outside the Job model on purpose**: it takes no Job slot, it is
+   * answered while a script Job is RUNNING, and it never touches `currentJob` or
+   * the derived state. A context request is a read of browser facts, not work the
+   * operator's page has to wait for.
+   */
+  async function serveRequestContext(message, deliveredOn) {
+    const reply = (outgoing) => {
+      sendToOrigin(deliveredOn, outgoing.requestId, outgoing);
+    };
+
+    const reason = contextNotReadyReason();
+    if (reason !== null) {
+      reply(
+        createRequestContextError(
+          message.requestId,
+          CONTEXT_ERROR_CODES.NOT_READY,
+          `Bridge 当前无法提供请求上下文（${reason}）。`,
+        ),
+      );
+      return;
+    }
+
+    // The tab this context is sampled from, remembered so the answer can be checked
+    // against the binding it was taken under.
+    const sampledTabId = workTab.tabId;
+
+    let outcome;
+    try {
+      outcome = await requestContext.read({
+        tabId: workTab.tabId,
+        targetUrl: message.targetUrl,
+        scope: message.scope,
+        topLevelSite: message.topLevelSite,
+        hasCrossSiteAncestor: message.hasCrossSiteAncestor,
+      });
+    } catch (error) {
+      reply(
+        createRequestContextError(
+          message.requestId,
+          CONTEXT_ERROR_CODES.CONTEXT_FAILED,
+          `读取请求上下文时出现意外错误：${describeError(error)}`,
+        ),
+      );
+      return;
+    }
+
+    // Reading cookies and page facts is asynchronous, and the tab set can change
+    // while it runs: a second ordinary tab makes Bridge NOT_READY for exactly this
+    // request. Answering anyway would disclose a context sampled from a tab it can
+    // no longer identify — data the Service could not have obtained a moment later.
+    //
+    // A refresh may still be in flight (the manager deliberately keeps the previous
+    // binding visible until its `tabs.query()` answers), so the current snapshot is
+    // awaited first; otherwise this check would read the stale binding it is meant
+    // to catch.
+    if (typeof workTab.settled === 'function') {
+      try {
+        await workTab.settled();
+      } catch (error) {
+        logger.warn?.('[bridge] waiting for the work tab snapshot failed', error);
+      }
+    }
+    if (!workTab.isBound || workTab.tabId !== sampledTabId) {
+      reply(
+        createRequestContextError(
+          message.requestId,
+          CONTEXT_ERROR_CODES.NOT_READY,
+          `Work Tab 绑定在采样期间发生了变化（${workTab.reason ?? 'UNKNOWN'}）。`,
+        ),
+      );
+      return;
+    }
+
+    if (!outcome || outcome.ok !== true) {
+      reply(
+        createRequestContextError(
+          message.requestId,
+          outcome?.code ?? CONTEXT_ERROR_CODES.CONTEXT_FAILED,
+          outcome?.message ?? '读取请求上下文失败。',
+        ),
+      );
+      return;
+    }
+
+    // `buildRequestContext` copies every field by whitelist, so this is a guard
+    // against a future field rather than against today's shape — the same reason
+    // the EXECUTE path checks its return value instead of trusting it.
+    if (!isJsonCompatible(outcome.context)) {
+      reply(
+        createRequestContextError(
+          message.requestId,
+          CONTEXT_ERROR_CODES.CONTEXT_FAILED,
+          '上下文不是 JSON-compatible，拒绝静默改写后返回。',
+        ),
+      );
+      return;
+    }
+
+    reply(createRequestContextOk(message.requestId, outcome.context));
+    logger.info?.(
+      `[bridge] request context for ${outcome.context.targetOrigin}: ${outcome.context.cookieCount} cookie(s), ${outcome.context.httpOnlyCookieCount} httpOnly, user agent from ${outcome.context.userAgentSource}`,
+    );
   }
 
   async function runJob(job) {
@@ -222,10 +365,16 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
       logger.warn?.(`[bridge] ignoring inbound frame (${parsed.failure}): ${parsed.error}`);
       // There is no ERROR message type in V1, so a rejected request that still
       // carried a usable jobId is answered with the RESULT the Service is
-      // waiting for, using the one code that says "this job did not run".
+      // waiting for, using the one code that says "this job did not run". A
+      // context request gets the same treatment with its own envelope, so a
+      // malformed frame never leaves the Service waiting for an answer.
       if (parsed.jobId !== null) {
         send(
           createResultError(parsed.jobId, ERROR_CODES.SCRIPT_EXECUTION_FAILED, parsed.error),
+        );
+      } else if (parsed.requestId !== null && parsed.requestId !== undefined) {
+        send(
+          createRequestContextError(parsed.requestId, CONTEXT_ERROR_CODES.INVALID_TARGET_URL, parsed.error),
         );
       }
       return;
@@ -235,6 +384,13 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
 
     if (message.type === SERVICE_MESSAGE_TYPES.GET_STATUS) {
       send(statusMessage());
+      return;
+    }
+
+    if (message.type === SERVICE_MESSAGE_TYPES.GET_REQUEST_CONTEXT) {
+      // Before the BUSY check, and never through `runJob`: a context request is
+      // not a Job, so a running Job neither blocks it nor is disturbed by it.
+      await serveRequestContext(message, deliveredOn);
       return;
     }
 

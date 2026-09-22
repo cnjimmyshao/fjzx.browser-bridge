@@ -102,6 +102,8 @@ Bridge → Service：
 
 不建立 GET_RESULT、独立 ERROR、BLOCKED、ACK、JOB_CREATED、JOB_FINISHED 等消息。
 
+> 例外（**未冻结**）：第 14 节记录一对实验性消息 `GET_REQUEST_CONTEXT` / `REQUEST_CONTEXT`。它们不属于 V1 契约，有自己的错误码，删掉不影响上面四种消息中的任何一种。
+
 ### 8.1 EXECUTE
 
 ```json
@@ -262,3 +264,43 @@ V1 不做 Runtime 系统、多 Tab/并行、Job Queue/History、Retry/幂等、�
 另外覆盖：第 5.1 节所述的 `USER_SCRIPTS_UNAVAILABLE` 前置条件、脚本抛错返回 `SCRIPT_EXECUTION_FAILED`（场景 8）、Service 断开后自动重连（场景 11）、Bridge 不产生业务状态（场景 12）、非法帧不打断连接。
 
 POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-extension`），并在运行前通过 CDP 打开 Extension 详情页开启 Allow User Scripts。
+
+## 14. 实验性能力：请求上下文（未冻结）
+
+> **这一节不是 V1 契约。** 它记录 issue #13 的实验结果与实现，用于评审；冻结与否由维护者决定。调研与实测见 [docs/research/request-context-poc.md](research/request-context-poc.md)。
+
+**问题**：页面里发现一个资源 URL 后，Service 想用自己的 Node 后端把它下下来。普通页面 JavaScript 拿不到 HttpOnly Cookie，因此需要 Bridge 以**通用、最小权限**的方式回答"浏览器会为这个 URL 发送什么"。Bridge 不因此理解任何网站、媒体或业务概念：它只知道 URL 与浏览器当前状态。
+
+> 措辞上的诚实：`chrome.cookies` 给的是"**存储中匹配该 URL 的 cookie 全集**"，不是"浏览器此刻会发送的集合"——SameSite 与第三方拦截都不参与读取，所以 Service 可能拿到浏览器本会扣下的 cookie。要真正复现浏览器的发送行为，需要 Service 侧再套一层策略。
+
+**新增的消息对**（Service → Bridge 请求，Bridge → Service 应答）：
+
+```json
+{ "type": "GET_REQUEST_CONTEXT", "requestId": "rc-1", "targetUrl": "https://cdn.example/media/1?sign=…",
+  "scope": "TARGET_ONLY", "hasCrossSiteAncestor": true }
+```
+
+这个示例的前提是 **Work Tab 在 `https://www.example`**：目标是跨源 CDN，因此必须显式声明 `TARGET_ONLY`（默认的 `WORK_TAB_ORIGIN` 只服务与 Work Tab 同源的目标）；`topLevelSite` 省略即表示取 Work Tab 自己的 origin，显式给出时**只能是该 origin**，或传 `null` 表示不做分区查询。
+
+```json
+{ "type": "REQUEST_CONTEXT", "requestId": "rc-1", "ok": true, "context": {
+  "targetUrl": "…", "targetOrigin": "…", "scope": "…", "observedAt": "2026-01-01T00:00:00.000Z",
+  "cookieHeader": "…", "cookieCount": 2, "httpOnlyCookieCount": 1, "partitionedCookieCount": 0,
+  "exactPartitionSelection": true, "hostAccessCoverage": "all", "duplicateCookieNames": [],
+  "cookies": [{ "name": "…", "domain": "…", "path": "/", "secure": true, "httpOnly": true,
+                "sameSite": "lax", "session": true, "partitioned": false, "topLevelSite": null }],
+  "userAgent": "…", "userAgentSource": "work-tab-page", "serviceWorkerUserAgent": "…",
+  "referer": "…", "workTabUrl": "…", "documentReferrer": "…", "referrerPolicy": null } }
+```
+
+`exactPartitionSelection`、`hostAccessCoverage` 与 `duplicateCookieNames` **总是出现**，而且不是装饰：它们是"分区是否精确、权限是否可能过滤掉父域 cookie、header 顺序是否可信"的唯一信号，Service 不应把它们当作可忽略的附加字段。
+
+失败时 `ok:false` + `error:{code,message}`，code 只有：`NOT_READY`、`INVALID_TARGET_URL`、`INVALID_SCOPE`、`INVALID_PARTITION`、`TARGET_OUT_OF_SCOPE`、`CONTEXT_FAILED`。
+
+**与 Job 模型的关系**：上下文请求**不占 Job 槽**、在 `RUNNING` 期间照常服务、也不与 `USER_SCRIPTS_UNAVAILABLE` 联动——读 Cookie 与页面事实从不执行 Service JavaScript。它既不改 `currentJob`，也不改 `IDLE/RUNNING/NOT_READY` 的推导。
+
+**权限**：新增 `cookies`（`cookies` 权限本身不新增安装警告）与 `scripting`（读 Work Tab 页面自己的 UA / referrer，worker 代答不了）。读取范围由 `chrome.cookies.getAll({ url })` 与 host 权限共同限制：**Bridge 从不用 `getAll({})` 或 `getAll({domain})`**。
+
+**实测约束**：HttpOnly 可读；SameSite 不影响读取（产物是"存储中匹配的全集"，见上）；**分区（CHIPS）cookie 必须给出完整的分区键** —— 只有 `topLevelSite` 会同时命中 `hasCrossSiteAncestor` 的两种取值（两个分区都有同名 cookie 时会一起返回），因此请求可以带 `hasCrossSiteAncestor`，默认按两个 schemeful site 推导（同站 → `false`，跨站 → `true`；"可注册域"是无 PSL 的末两段近似，例外情况由调用方显式传值；非法 boolean 一律 `INVALID_PARTITION`，`topLevelSite: null` 也不豁免校验；**显式给出的 `topLevelSite` 只能是 Work Tab 自身的 origin**（`null` 表示不做分区查询，省略即用该 origin）：判断"同站"需要公共后缀表，而 Bridge 不携带它，`evil.co.uk` 与 `app.bank.co.uk` 会被"末两段标签"误判为同站，取到该页面从未处于其下的分区 cookie，因此不做近似、直接 `INVALID_PARTITION`；**Chrome < 130 没有这一位**，那里会降级为只按顶层站点取分区，并在响应里用 `exactPartitionSelection: false` 明说，而不是让整条查询失败——manifest 不为这个实验能力抬高 V1 的版本底线）；**cookie store 取自 Work Tab**（`getAllCookieStores()`，隐身窗口的 Tab 有自己的 store，不传 `storeId` 会读到普通 profile）；UA 必须取自页面，**页面读不到就是失败**（用户限制站点访问时 `chrome.cookies` 同时被静默过滤，不能降级成 worker 的 UA）；**目标站点的访问权限单独校验**（host 权限按**每个 cookie** 过滤，跨源时 Work Tab 可读不代表 CDN 的 cookie 可见）：整块 `<all_urls>` 授权仍在 → `hostAccessCoverage: 'all'`（不可能有 cookie 被逐条过滤）；只剩目标 origin → `'origin'`（父域 cookie 可能已被静默丢弃，不宣称完整；不猜可注册域，因为不带 PSL 的猜测会在 `co.uk`/`github.io` 上判错）；目标 origin 完全不在授权内 → `CONTEXT_FAILED`；权限 API 问不到 → `'unknown'`。match pattern 不带端口，模式一律由 scheme + hostname 组成；覆盖范围**在读取前后各查一次**，期间被收窄就拒绝，避免对一份已被静默裁剪的集合宣称为完整；一次采样必须来自同一个**文档**（用注入结果的 `documentId` 在读取 cookie 前后各标识一次，URL 变化——包括同源换路径——以及**同 URL 的重载**都会导致重试一次，仍不一致则报 `CONTEXT_FAILED`；浏览器不返回 `documentId` 时退回 URL 比较）；采样后要**等 Work Tab 的当前快照**（`settled()`）再复验绑定，期间出现第二个普通 Tab 即返回 `NOT_READY`，而不是披露旧绑定的上下文；同名 cookie 只有在**跨两次查询**（非分区 + 分区）时才无法复现相对顺序，实现只对这类并列用 `duplicateCookieNames` 报告（同一次响应内部保持 API 顺序，path 长度不同则顺序本就确定）；无名 cookie（`=value`）原样保留在 header 与元数据里；**被交过 URL 的 API 失败时只报错误类型**（浏览器错误文本可能带上整条 URL，含签名），cookie 值不落盘也不进日志。
+
+**验证**：`npm run poc:context`（= `node tests/poc/request-context.mjs`）在真实扩展上跑 15 个场景，含反例与"RUNNING 期间取上下文不影响 Job"；证据写在 `docs/research/evidence/request-context.json`。`npm run poc` 的 12 个 V1 场景不受影响。

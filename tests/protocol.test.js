@@ -13,9 +13,19 @@ import {
   parseServiceMessage,
 } from '../src/lib/protocol.js';
 
-test('the frozen V1 message set contains exactly four types and three codes', () => {
-  assert.deepEqual(Object.values(SERVICE_MESSAGE_TYPES), ['EXECUTE', 'GET_STATUS']);
-  assert.deepEqual(Object.values(BRIDGE_MESSAGE_TYPES), ['RESULT', 'STATUS']);
+test('the frozen V1 four messages and three codes are unchanged, plus one experimental pair', () => {
+  // The V1 set is frozen by docs/architecture-v1.md, so the first four entries are
+  // asserted in order and must never drift. `GET_REQUEST_CONTEXT` /
+  // `REQUEST_CONTEXT` (issue #13) are appended deliberately and are **not**
+  // frozen: they carry their own error-code set in `request-context.js`, and
+  // removing them again leaves the four V1 messages, ERROR_CODES and
+  // isJsonCompatible untouched.
+  assert.deepEqual(Object.values(SERVICE_MESSAGE_TYPES), [
+    'EXECUTE',
+    'GET_STATUS',
+    'GET_REQUEST_CONTEXT',
+  ]);
+  assert.deepEqual(Object.values(BRIDGE_MESSAGE_TYPES), ['RESULT', 'STATUS', 'REQUEST_CONTEXT']);
   assert.deepEqual(Object.values(ERROR_CODES), [
     'BUSY',
     'NOT_READY',

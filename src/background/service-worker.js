@@ -1,4 +1,5 @@
 import { createBridgeState } from '../lib/bridge-state.js';
+import { createRequestContextSource } from '../lib/request-context-source.js';
 import { createServiceConfigSync } from '../lib/service-config.js';
 import { createServiceConnection } from '../lib/service-connection.js';
 import { createSettingsStore } from '../lib/settings-store.js';
@@ -62,6 +63,10 @@ const bridge = createBridgeState({
   connection,
   workTab,
   executor: createUserScriptExecutor({ logger: console }),
+  // Experimental: reads cookies and the Work Tab's own facts for one target URL.
+  // Injected like the executor, and resolved lazily inside, because `chrome.cookies`
+  // and `chrome.scripting` only exist once the permissions are granted.
+  requestContext: createRequestContextSource({ logger: console }),
   logger: console,
 });
 
