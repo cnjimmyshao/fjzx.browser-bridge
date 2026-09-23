@@ -14,7 +14,9 @@ import {
 } from '../src/lib/protocol.js';
 
 test('the frozen V1 message set contains exactly four types and three codes', () => {
-  assert.deepEqual(Object.values(SERVICE_MESSAGE_TYPES), ['EXECUTE', 'GET_STATUS']);
+  // KEEPALIVE is not a fifth Service instruction: it carries no payload, is never
+  // answered and exists only to keep the socket receiving. See ADR 0001.
+  assert.deepEqual(Object.values(SERVICE_MESSAGE_TYPES), ['EXECUTE', 'GET_STATUS', 'KEEPALIVE']);
   assert.deepEqual(Object.values(BRIDGE_MESSAGE_TYPES), ['RESULT', 'STATUS']);
   assert.deepEqual(Object.values(ERROR_CODES), [
     'BUSY',
@@ -96,7 +98,23 @@ test('ordinary JSON input still passes through untouched', () => {
 
 test('parses GET_STATUS, which needs nothing else', () => {
   const result = parseServiceMessage(JSON.stringify({ type: 'GET_STATUS' }));
-  assert.deepEqual(result, { ok: true, message: { type: 'GET_STATUS' } });});
+  assert.deepEqual(result, { ok: true, message: { type: 'GET_STATUS' } });
+});
+
+test('parses KEEPALIVE, which carries nothing', () => {
+  assert.deepEqual(parseServiceMessage(JSON.stringify({ type: 'KEEPALIVE' })), {
+    ok: true,
+    message: { type: 'KEEPALIVE' },
+  });
+
+  // Extra fields are not the frame's business, but they must not turn a keepalive
+  // into a Job report or an UNKNOWN_TYPE warning every 20 seconds.
+  const withSpuriousFields = parseServiceMessage(
+    JSON.stringify({ type: 'KEEPALIVE', jobId: 'not-a-job', at: 1 }),
+  );
+  assert.deepEqual(withSpuriousFields, { ok: true, message: { type: 'KEEPALIVE' } });
+});
+
 
 test('rejects anything that is not a text frame', () => {
   for (const raw of [undefined, null, 42, {}, [], Buffer.from('{}')]) {
@@ -125,7 +143,7 @@ test('rejects JSON that is not an object', () => {
 
 test('rejects unknown message types, including Bridge-only ones', () => {
   // RESULT and STATUS travel the other way; seeing them here is not our business.
-  for (const type of ['RESULT', 'STATUS', 'FOO', '', 42, undefined]) {
+  for (const type of ['RESULT', 'STATUS', 'FOO', 'keepalive', '', 42, undefined]) {
     const result = parseServiceMessage(JSON.stringify({ type, jobId: 'job-3' }));
     assert.equal(result.ok, false);
     assert.equal(result.failure, PARSE_FAILURES.UNKNOWN_TYPE);

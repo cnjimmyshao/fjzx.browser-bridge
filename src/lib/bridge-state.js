@@ -238,7 +238,14 @@ export function createBridgeState({ connection, workTab, executor, onStateChange
       return;
     }
 
-    // The only remaining valid type is EXECUTE.
+    // KEEPALIVE exists only to keep the socket receiving, so it is answered by
+    // doing nothing at all: no RESULT, no STATUS, no Job, no Work Tab access, no
+    // stored history, and no effect on the derived IDLE/RUNNING/NOT_READY. Only
+    // the arrival of the frame matters, and that already happened.
+    if (message.type === SERVICE_MESSAGE_TYPES.KEEPALIVE) return;
+
+    // The only remaining valid type is EXECUTE: GET_STATUS and KEEPALIVE both
+    // returned above.
     if (state() === BRIDGE_STATES.RUNNING) {
       // No queue and no pre-emption: the first Job keeps running untouched.
       send(createResultError(message.jobId, ERROR_CODES.BUSY, `Bridge 正在执行 ${currentJob.jobId}。`));

@@ -331,34 +331,39 @@ export async function launchBrowser(options) {
     throw error;
   }
 
-  const deadline = Date.now() + 30000;
+  const deadline = Date.now() + 45000;
+  let lastVersionError = null;
+  let refusedAfterExit = 0;
   while (Date.now() < deadline) {
-    // A browser that starts and then dies — a startup failure, or an executable that
-    // is not really Chrome — never opens the port. Waiting out the full deadline
-    // would hide the exit code behind a generic timeout.
-    if (child.exitCode !== null) {
-      await removeProfile(profile);
-      throw new Error(`浏览器进程已退出（退出码 ${child.exitCode}），调试端口 ${port} 没有打开。`);
-    }
-
     let version = null;
     try {
       const response = await cdpFetch(`http://127.0.0.1:${port}/json/version`, {}, 2000);
       version = await response.json();
-    } catch {
+    } catch (error) {
       version = null; // not up yet, or not answering
+      lastVersionError = error;
     }
 
-    if (version) {
-      // Chrome hands off to an instance already using this profile and exits, so a
-      // dead child means this endpoint is somebody else's.
-      if (child.exitCode !== null) {
+    if (version) return { port, profile, pid: child.pid, browser: version.Browser, stop };
+
+    // The spawned process exiting is *not* by itself a startup failure: on Windows
+    // this Chrome hands the session to another process and the launcher exits with
+    // code 0 while the endpoint is still coming up. Treating that as "port did not
+    // open" fails a healthy start, so an exit is only a hint.
+    //
+    // A *refused* connection alongside a dead launcher is different: nothing is
+    // listening and nothing is coming, so waiting out the full deadline would report
+    // a generic timeout instead of the exit code that explains it.
+    if (child.exitCode !== null && isConnectionRefused(lastVersionError)) {
+      refusedAfterExit += 1;
+      if (refusedAfterExit >= 4) {
         await removeProfile(profile);
         throw new Error(
-          `浏览器进程已退出（退出码 ${child.exitCode}），端口 ${port} 上的端点不属于本次 POC。`,
+          `浏览器进程已退出（退出码 ${child.exitCode}），调试端口 ${port} 没有打开。`,
         );
       }
-      return { port, profile, pid: child.pid, browser: version.Browser, stop };
+    } else {
+      refusedAfterExit = 0;
     }
 
     await sleep(250);
@@ -368,7 +373,11 @@ export async function launchBrowser(options) {
   // caller, so the caller's cleanup cannot reach it: it has to die here.
   await killChild();
   await removeProfile(profile);
-  throw new Error(`浏览器调试端口 ${port} 在 30s 内没有就绪`);
+  const reason = child.exitCode === null ? '没有出现端点' : `进程已退出（退出码 ${child.exitCode}）`;
+  throw new Error(
+    `浏览器调试端口 ${port} 在 45s 内没有就绪（${reason}）` +
+      (lastVersionError ? `：${lastVersionError.message}` : ''),
+  );
 
   /**
    * Signal the browser and wait for it to actually be gone.
@@ -392,10 +401,22 @@ export async function launchBrowser(options) {
    *
    * Without this the POC leaves a full Chrome profile behind on every successful
    * run — one per `--port`, tens of megabytes each.
+   *
+   * Closing is asked for through CDP as well as signalled. The spawned process may
+   * already have exited (see `launchBrowser`), in which case the signal reaches
+   * nothing while the browser that owns the port is still running and still holds
+   * the profile — the POC would then never be able to clean up or rerun.
    */
   async function stop() {
+    await closeThroughCdp(port);
     await killChild();
-    return removeProfile(profile);
+    const removed = await removeProfile(profile);
+    if (!removed) {
+      // A profile still locked here means the browser is alive; report it instead of
+      // letting the next run fail on a leftover profile with no explanation.
+      console.warn(`[poc] 无法删除 profile ${profile}（浏览器可能仍在运行）`);
+    }
+    return removed;
   }
 }
 
@@ -414,6 +435,51 @@ async function isEndpointAlive(port) {
     return true;
   } catch (error) {
     return error?.name === 'TimeoutError';
+  }
+}
+
+/**
+ * Did the runtime refuse the connection outright, as opposed to never answering?
+ *
+ * `fetch` reports both as a `TypeError`, so the distinguishing detail is in the
+ * cause: a refused socket means nothing is listening, while a timeout means
+ * something accepted the connection and stayed silent.
+ *
+ * @param {unknown} error
+ */
+function isConnectionRefused(error) {
+  if (error?.name === 'TimeoutError') return false;
+  let current = error;
+  for (let depth = 0; current && depth < 5; depth += 1) {
+    const code = current.code ?? current.errno;
+    if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return true;
+    if (current.name === 'TimeoutError') return false;
+    current = current.cause;
+  }
+  return false;
+}
+
+/**
+ * Ask the browser on `port` to shut itself down, over the browser-level CDP target.
+ *
+ * Best-effort: an unreachable or already-gone browser is not an error, because the
+ * caller signals the spawned process as well.
+ *
+ * @param {number} port
+ */
+async function closeThroughCdp(port, timeoutMs = 5000) {
+  let client = null;
+  try {
+    const response = await cdpFetch(`http://127.0.0.1:${port}/json/version`, {}, 1500);
+    const version = await response.json();
+    if (!version?.webSocketDebuggerUrl) return false;
+    client = await connect(version.webSocketDebuggerUrl);
+    await client.send('Browser.close', {}, timeoutMs);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    client?.close();
   }
 }
 
