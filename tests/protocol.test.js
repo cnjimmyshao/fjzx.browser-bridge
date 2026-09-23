@@ -13,9 +13,9 @@ import {
   parseServiceMessage,
 } from '../src/lib/protocol.js';
 
-test('the frozen V1 message set contains exactly four types and three codes', () => {
-  // KEEPALIVE is not a fifth Service instruction: it carries no payload, is never
-  // answered and exists only to keep the socket receiving. See ADR 0001.
+test('the frozen message set has three Service types, two Bridge types and three codes', () => {
+  // KEEPALIVE is not a fifth answer: it carries no payload, is never answered and
+  // exists only to keep the socket receiving. See ADR 0001.
   assert.deepEqual(Object.values(SERVICE_MESSAGE_TYPES), ['EXECUTE', 'GET_STATUS', 'KEEPALIVE']);
   assert.deepEqual(Object.values(BRIDGE_MESSAGE_TYPES), ['RESULT', 'STATUS']);
   assert.deepEqual(Object.values(ERROR_CODES), [
