@@ -1,0 +1,538 @@
+{
+  "startedAt": "2026-09-23T16:41:52.104Z",
+  "environment": {
+    "platform": "win32 10.0.26200 x64",
+    "node": "v26.7.0",
+    "keepaliveIntervalMs": 20000
+  },
+  "options": {
+    "port": 9495,
+    "headed": false,
+    "keepaliveSeconds": 600,
+    "baselineSeconds": 100,
+    "stopSeconds": 100,
+    "reconnectDownSeconds": 12,
+    "phases": [
+      "A",
+      "B",
+      "C2",
+      "D",
+      "E",
+      "F",
+      "G"
+    ],
+    "evidence": "docs/research/evidence/keepalive-poc.json"
+  },
+  "browserVersion": "Chrome/153.0.8010.52",
+  "commit": "11ebd1381cc0983c4d99f6f1a2a74784dff4af17",
+  "workingTreeDirty": "M docs/current/README.md\n M docs/current/architecture.md\n M docs/decisions/0001-service-keepalive.md\n M docs/decisions/README.md\n M docs/development.md\n M docs/research/README.md\n?? docs/research/2026-09-23-keepalive-verification.md\n?? docs/research/evidence/",
+  "phases": [
+    {
+      "phase": "A",
+      "startedAt": 3420,
+      "ok": true,
+      "assertions": [
+        {
+          "description": "A 基线：无 WebSocket 活动时 Worker 被回收",
+          "ok": true,
+          "reclaimAfterMs": 30875,
+          "openConnectionsAtStart": 1
+        },
+        {
+          "description": "A 基线：socket 随 Worker 一起断开，且未重连",
+          "ok": true,
+          "socketDroppedAfterMs": 30875
+        }
+      ],
+      "durationMs": 30876
+    },
+    {
+      "phase": "B",
+      "startedAt": 34296,
+      "ok": true,
+      "assertions": [
+        {
+          "description": "B 保活窗口内 worker 从未被回收（600.2s）",
+          "ok": true,
+          "reconnects": 2
+        },
+        {
+          "description": "B 窗口内 socket 始终 OPEN",
+          "ok": true
+        },
+        {
+          "description": "B 窗口 >= 10 分钟且 KEEPALIVE 按 20s 投递（31 次）",
+          "ok": true,
+          "expectedAtLeast": 30
+        }
+      ],
+      "durationMs": 601688
+    },
+    {
+      "phase": "C2",
+      "startedAt": 635984,
+      "ok": true,
+      "assertions": [
+        {
+          "description": "C2 长时间无业务 Job 后 GET_STATUS 立刻有 STATUS",
+          "ok": true,
+          "state": "IDLE"
+        },
+        {
+          "description": "C2 该 STATUS 仍是 IDLE",
+          "ok": true
+        },
+        {
+          "description": "C2 无副作用 EXECUTE → RESULT ok=true",
+          "ok": true,
+          "data": {
+            "ok": 1
+          }
+        },
+        {
+          "description": "C2 Bridge 从未对 KEEPALIVE 作出应答",
+          "ok": true
+        }
+      ],
+      "durationMs": 46
+    },
+    {
+      "phase": "D",
+      "startedAt": 636031,
+      "ok": true,
+      "assertions": [
+        {
+          "description": "D 停止保活后 worker 恢复 idle 回收",
+          "ok": true,
+          "reclaimAfterStopMs": 30897,
+          "reclaimAfterLastKeepaliveMs": 30946
+        }
+      ],
+      "durationMs": 30897
+    },
+    {
+      "phase": "E",
+      "startedAt": 666928,
+      "ok": true,
+      "assertions": [
+        {
+          "description": "E RUNNING 期间 GET_STATUS 仍为 RUNNING + 原 jobId",
+          "ok": true,
+          "state": "RUNNING",
+          "jobId": "running-keepalive-2"
+        },
+        {
+          "description": "E 跨多个 keepalive 周期后 currentJob 未被改写",
+          "ok": true,
+          "state": "RUNNING",
+          "jobId": "running-keepalive-2"
+        },
+        {
+          "description": "E 原 Job 正常 RESULT",
+          "ok": true,
+          "data": "long-done"
+        },
+        {
+          "description": "E KEEPALIVE 没有产生 BUSY",
+          "ok": true
+        },
+        {
+          "description": "E KEEPALIVE 没有产生无 jobId 的 RESULT",
+          "ok": true
+        }
+      ],
+      "durationMs": 26449
+    },
+    {
+      "phase": "F",
+      "startedAt": 693377,
+      "ok": true,
+      "assertions": [
+        {
+          "description": "F NOT_READY 期间 KEEPALIVE 不改变状态",
+          "ok": true,
+          "state": "NOT_READY",
+          "reason": "WORK_TAB_CLOSED"
+        },
+        {
+          "description": "F 无 Work Tab 时报告 WORK_TAB_CLOSED 或 NO_WORK_TAB",
+          "ok": true,
+          "reason": "WORK_TAB_CLOSED"
+        },
+        {
+          "description": "F KEEPALIVE 不创建 Tab",
+          "ok": true
+        },
+        {
+          "description": "F NOT_READY 期间 socket 仍可达",
+          "ok": true,
+          "openConnections": 1
+        },
+        {
+          "description": "F Bridge 仍未对 KEEPALIVE 作出应答",
+          "ok": true
+        },
+        {
+          "description": "F 多 Tab 时仍是 MULTIPLE_TABS，Bridge 不任选一个",
+          "ok": true,
+          "reason": "MULTIPLE_TABS"
+        }
+      ],
+      "durationMs": 43642
+    },
+    {
+      "phase": "G",
+      "startedAt": 737019,
+      "ok": true,
+      "assertions": [
+        {
+          "description": "G 断开前 KEEPALIVE 循环在运行",
+          "ok": true
+        },
+        {
+          "description": "G Service 停止后 KEEPALIVE 发送循环已清理",
+          "ok": true
+        },
+        {
+          "description": "G 进程内没有残留的周期定时器",
+          "ok": true,
+          "leakedIntervals": 0
+        },
+        {
+          "description": "G Service 恢复后 Bridge 重连",
+          "ok": true,
+          "recoveredMs": 11064
+        },
+        {
+          "description": "G 重连后 KEEPALIVE 恢复投递",
+          "ok": true,
+          "sentBeforeResume": 0,
+          "sentNow": 1
+        },
+        {
+          "description": "G 重连后仍然只有一个 keepalive 发送循环",
+          "ok": true,
+          "keepaliveSends": 1
+        }
+      ],
+      "durationMs": 23076
+    }
+  ],
+  "timings": {
+    "baselineReclaimMs": 30875,
+    "baselineSocketDropMs": 30875,
+    "keepaliveWindowMs": 600244,
+    "keepaliveSent": 31,
+    "keepaliveExpectedAtLeast": 30,
+    "reclaimAfterStopMs": 30897,
+    "reclaimAfterLastKeepaliveMs": 30946,
+    "workerReclaimedDuringOutage": false,
+    "reconnectAfterOutageMs": 11064
+  },
+  "events": [
+    {
+      "at": 1790181713723,
+      "t": 1619,
+      "phase": "setup",
+      "event": "bridge-connected",
+      "openConnections": 1
+    },
+    {
+      "at": 1790181715524,
+      "t": 3420,
+      "phase": "setup",
+      "event": "ready",
+      "state": "IDLE"
+    },
+    {
+      "at": 1790181746399,
+      "t": 34295,
+      "phase": "A",
+      "event": "baseline-window",
+      "durationMs": 30875,
+      "reclaims": 1,
+      "socketDrops": 1,
+      "socketDroppedAfterMs": 30875,
+      "workerTargetsSeen": [
+        1,
+        0
+      ]
+    },
+    {
+      "at": 1790181746400,
+      "t": 34296,
+      "phase": "B",
+      "event": "wake-begin",
+      "method": "settings-save",
+      "via": "ws://127.0.0.1:1"
+    },
+    {
+      "at": 1790181747843,
+      "t": 35739,
+      "phase": "B",
+      "event": "wake-done",
+      "reconnectMs": 253
+    },
+    {
+      "at": 1790181747843,
+      "t": 35739,
+      "phase": "B",
+      "event": "keepalive-started",
+      "intervalMs": 20000
+    },
+    {
+      "at": 1790182348087,
+      "t": 635983,
+      "phase": "B",
+      "event": "keepalive-window",
+      "durationMs": 600244,
+      "sent": 31,
+      "reconnects": 2,
+      "reclaims": 0
+    },
+    {
+      "at": 1790182348135,
+      "t": 636031,
+      "phase": "D",
+      "event": "keepalive-stopped",
+      "lastSendAgoMs": 49
+    },
+    {
+      "at": 1790182379032,
+      "t": 666928,
+      "phase": "D",
+      "event": "stop-window",
+      "durationMs": 30897,
+      "reclaims": 1,
+      "reclaimAfterMs": 30897
+    },
+    {
+      "at": 1790182379033,
+      "t": 666929,
+      "phase": "E",
+      "event": "wake-begin",
+      "method": "settings-save",
+      "via": "ws://127.0.0.1:1"
+    },
+    {
+      "at": 1790182380443,
+      "t": 668339,
+      "phase": "E",
+      "event": "wake-done",
+      "reconnectMs": 254
+    },
+    {
+      "at": 1790182380444,
+      "t": 668340,
+      "phase": "E",
+      "event": "keepalive-restarted"
+    },
+    {
+      "at": 1790182449124,
+      "t": 737020,
+      "phase": "G",
+      "event": "service-stopping",
+      "keepaliveSends": 35
+    },
+    {
+      "at": 1790182449125,
+      "t": 737021,
+      "phase": "G",
+      "event": "service-down"
+    },
+    {
+      "at": 1790182461134,
+      "t": 749030,
+      "phase": "G",
+      "event": "service-restarted",
+      "workerReclaimed": false
+    },
+    {
+      "at": 1790182472199,
+      "t": 760095,
+      "phase": "G",
+      "event": "reconnect-outcome",
+      "recoveredMs": 11064,
+      "workerReclaimed": false
+    }
+  ],
+  "checks": [
+    {
+      "phase": "A",
+      "description": "A 基线：无 WebSocket 活动时 Worker 被回收",
+      "ok": true,
+      "reclaimAfterMs": 30875,
+      "openConnectionsAtStart": 1
+    },
+    {
+      "phase": "A",
+      "description": "A 基线：socket 随 Worker 一起断开，且未重连",
+      "ok": true,
+      "socketDroppedAfterMs": 30875
+    },
+    {
+      "phase": "B",
+      "description": "B 保活窗口内 worker 从未被回收（600.2s）",
+      "ok": true,
+      "reconnects": 2
+    },
+    {
+      "phase": "B",
+      "description": "B 窗口内 socket 始终 OPEN",
+      "ok": true
+    },
+    {
+      "phase": "B",
+      "description": "B 窗口 >= 10 分钟且 KEEPALIVE 按 20s 投递（31 次）",
+      "ok": true,
+      "expectedAtLeast": 30
+    },
+    {
+      "phase": "C2",
+      "description": "C2 长时间无业务 Job 后 GET_STATUS 立刻有 STATUS",
+      "ok": true,
+      "state": "IDLE"
+    },
+    {
+      "phase": "C2",
+      "description": "C2 该 STATUS 仍是 IDLE",
+      "ok": true
+    },
+    {
+      "phase": "C2",
+      "description": "C2 无副作用 EXECUTE → RESULT ok=true",
+      "ok": true,
+      "data": {
+        "ok": 1
+      }
+    },
+    {
+      "phase": "C2",
+      "description": "C2 Bridge 从未对 KEEPALIVE 作出应答",
+      "ok": true
+    },
+    {
+      "phase": "D",
+      "description": "D 停止保活后 worker 恢复 idle 回收",
+      "ok": true,
+      "reclaimAfterStopMs": 30897,
+      "reclaimAfterLastKeepaliveMs": 30946
+    },
+    {
+      "phase": "E",
+      "description": "E RUNNING 期间 GET_STATUS 仍为 RUNNING + 原 jobId",
+      "ok": true,
+      "state": "RUNNING",
+      "jobId": "running-keepalive-2"
+    },
+    {
+      "phase": "E",
+      "description": "E 跨多个 keepalive 周期后 currentJob 未被改写",
+      "ok": true,
+      "state": "RUNNING",
+      "jobId": "running-keepalive-2"
+    },
+    {
+      "phase": "E",
+      "description": "E 原 Job 正常 RESULT",
+      "ok": true,
+      "data": "long-done"
+    },
+    {
+      "phase": "E",
+      "description": "E KEEPALIVE 没有产生 BUSY",
+      "ok": true
+    },
+    {
+      "phase": "E",
+      "description": "E KEEPALIVE 没有产生无 jobId 的 RESULT",
+      "ok": true
+    },
+    {
+      "phase": "F",
+      "description": "F NOT_READY 期间 KEEPALIVE 不改变状态",
+      "ok": true,
+      "state": "NOT_READY",
+      "reason": "WORK_TAB_CLOSED"
+    },
+    {
+      "phase": "F",
+      "description": "F 无 Work Tab 时报告 WORK_TAB_CLOSED 或 NO_WORK_TAB",
+      "ok": true,
+      "reason": "WORK_TAB_CLOSED"
+    },
+    {
+      "phase": "F",
+      "description": "F KEEPALIVE 不创建 Tab",
+      "ok": true
+    },
+    {
+      "phase": "F",
+      "description": "F NOT_READY 期间 socket 仍可达",
+      "ok": true,
+      "openConnections": 1
+    },
+    {
+      "phase": "F",
+      "description": "F Bridge 仍未对 KEEPALIVE 作出应答",
+      "ok": true
+    },
+    {
+      "phase": "F",
+      "description": "F 多 Tab 时仍是 MULTIPLE_TABS，Bridge 不任选一个",
+      "ok": true,
+      "reason": "MULTIPLE_TABS"
+    },
+    {
+      "phase": "G",
+      "description": "G 断开前 KEEPALIVE 循环在运行",
+      "ok": true
+    },
+    {
+      "phase": "G",
+      "description": "G Service 停止后 KEEPALIVE 发送循环已清理",
+      "ok": true
+    },
+    {
+      "phase": "G",
+      "description": "G 进程内没有残留的周期定时器",
+      "ok": true,
+      "leakedIntervals": 0
+    },
+    {
+      "phase": "G",
+      "description": "G Service 恢复后 Bridge 重连",
+      "ok": true,
+      "recoveredMs": 11064
+    },
+    {
+      "phase": "G",
+      "description": "G 重连后 KEEPALIVE 恢复投递",
+      "ok": true,
+      "sentBeforeResume": 0,
+      "sentNow": 1
+    },
+    {
+      "phase": "G",
+      "description": "G 重连后仍然只有一个 keepalive 发送循环",
+      "ok": true,
+      "keepaliveSends": 1
+    }
+  ],
+  "remainingLimitations": [
+    "KEEPALIVE 只维持尚存活连接的消息活动；浏览器退出、系统休眠、网络中断或 worker 已被回收均不在保证范围内（ADR 0001）。",
+    "worker 存活时间取自 CDP /json/list 元数据；全程未附着 worker DevTools，因此无法观察 worker 内部计时器，只能观察 worker target 是否存在。",
+    "保活窗口内唯一的 WebSocket 流量是 KEEPALIVE 循环；GET_STATUS/EXECUTE 探针在窗口结束后才运行，不用额外活动代替被测机制。",
+    "本次为 headless（--headless=new） 模式、单一 Chrome for Testing 版本、单一 Windows 机器；不同版本或 headed 模式是否同样回收未在本次验证。",
+    "真实 Profile、真实业务站点与真实 Service 的业务 Job 未参与本次验证。"
+  ],
+  "summary": {
+    "phasesRun": 7,
+    "phasesFailed": 0,
+    "durationMs": 760095,
+    "assertionsRun": 27,
+    "assertionsRecorded": 27
+  },
+  "finishedAt": "2026-09-23T16:54:32.199Z",
+  "evidencePath": "docs/research/evidence/keepalive-poc.json"
+}
