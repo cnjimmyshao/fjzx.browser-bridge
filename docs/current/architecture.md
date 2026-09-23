@@ -37,6 +37,18 @@ Bridge 启动后查询普通 Tab，并将唯一候选自动绑定为 Work Tab。
 
 页面在同一 Tab 内导航时，Work Tab 身份不改变。恢复策略由 Service 决定。
 
+### 3.1 MV3 空闲回收与 Service 保活（KEEPALIVE）
+
+Bridge 是 Manifest V3 Service Worker，**空闲约 30s 会被 Chrome 回收，socket 随之关闭，重连定时器也一起消失**，此后 Bridge 一直离线，直到某个扩展事件把它唤醒。这与「Service 随时 push EXECUTE」直接冲突。
+
+已确认的机制：**Service 在既有 WebSocket 上周期性发送 `{"type":"KEEPALIVE"}`（每 20 秒）**。Chrome 116 起，收发 WebSocket **消息**会重置 Service Worker 的空闲计时；仅保持 socket 打开不算活动，因此这条消息的作用就是制造接收活动。决定来源与限制见 [ADR 0001](../decisions/0001-service-keepalive.md)。
+
+- **发送循环属于 Service**，与连接生命周期绑定：每条 Service 连接只有一个循环，断开或发送失败时清理，重连后恢复。
+- **Bridge 只识别它，然后保持沉默。** 不回 ACK/RESULT/STATUS，不占 Job 槽，不访问 Work Tab，不持久化，不改变 `IDLE/RUNNING/NOT_READY` 的推导。详见 §8.7。
+- **这不是健康检查，也不是唤醒通道。** KEEPALIVE 维持的是**尚存活连接**的消息活动；浏览器退出、系统休眠、网络中断、以及 worker 已被回收都不在保证范围内，Bridge 也不因此获得新的恢复或重放能力。
+
+Bridge 侧不新增自发保活 timer、`alarms`、offscreen、Native Messaging、健康评分或 Job 重试。
+
 ## 4. Service URL
 
 Service URL 是 V1 唯一必要的持久配置。新 BrowserProfile 首次使用时，由人工在 Extension Settings 填写并保存到 chrome.storage.local。后续 Bridge 启动后自动读取并连接。
@@ -90,11 +102,12 @@ Service Script 负责采集执行后的页面数据；Bridge 原样返回；Serv
 
 V1 建议使用 WebSocket + JSON。
 
-核心消息仅四种：
+核心消息四种，另有一条不计入应答的保活帧：
 
 Service → Bridge：
 - EXECUTE
 - GET_STATUS
+- KEEPALIVE（§8.7，保活专用，无载荷、无应答）
 
 Bridge → Service：
 - RESULT
@@ -210,6 +223,23 @@ V1 NOT_READY reason：
 
 这些 reason 只能描述 Bridge 技术状态，不包含 CAPTCHA/BLOCKED 等业务语义。
 
+### 8.7 KEEPALIVE
+
+```json
+{
+  "type": "KEEPALIVE"
+}
+```
+
+Service → Bridge 的单向保活帧，用于在 §3.1 所述的空闲回收窗口内维持 socket 的接收活动。它**没有其他字段**，Bridge 也不解释其中的任何内容。
+
+Bridge 收到它的行为就是**什么都不做**：不发送任何应答，不创建或占用 Job，不读写 Work Tab，不改变 `IDLE/RUNNING/NOT_READY`，不写历史。判定它是否达成的唯一依据就是这帧到达了浏览器，而这在收到它时已经成立。
+
+- 它不是心跳健康检查：没有 miss 计数、没有延迟测量、没有健康评分，也没有超时判定。
+- 它不是唤醒机制：Worker 一旦已被回收，KEEPALIVE 无法把它叫回来，那条连接的对象已经不存在。
+- 它不产生错误：Bridge 不为它回 `RESULT`，也不会因为连接不可用而回错误——连「发送失败」都不会发生，因为根本没有发送。
+- 帧上若带了其他字段（例如一个 `jobId`），Bridge 一律忽略，不会把它当成一个需要答复的 Job。
+
 ## 9. RESULT 与 STATUS
 
 RESULT 回答“刚才那个 Job 技术执行得怎么样”，由 Bridge 在 Job 完成后主动 Push；Service 不需要 GET_RESULT。
@@ -228,6 +258,8 @@ STATUS 回答“Bridge 现在是什么状态”，仅在 GET_STATUS 时返回。
 ## 11. V1 不做
 
 V1 不做 Runtime 系统、多 Tab/并行、Job Queue/History、Retry/幂等、业务 BLOCKED、平台 Adapter、MAIN world、通用 Chrome API 转发、复杂协议 Envelope。
+
+§8.7 的 KEEPALIVE 是这条清单的唯一例外，而且是明确决定过的例外：它不新增 Bridge 侧 timer、健康监控、ACK 或重试，也不改变上面任何一种保证。除它之外的 heartbeat、健康评分、missed-heartbeat 计数仍不属于 V1。
 
 ## 12. 第一阶段 POC 验收
 
@@ -262,3 +294,19 @@ V1 不做 Runtime 系统、多 Tab/并行、Job Queue/History、Retry/幂等、�
 另外覆盖：第 5.1 节所述的 `USER_SCRIPTS_UNAVAILABLE` 前置条件、脚本抛错返回 `SCRIPT_EXECUTION_FAILED`（场景 8）、Service 断开后自动重连（场景 11）、Bridge 不产生业务状态（场景 12）、非法帧不打断连接。
 
 POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-extension`），并在运行前通过 CDP 打开 Extension 详情页开启 Allow User Scripts。
+
+### 13.1 保活（§3.1 / §8.7）的 POC 对应
+
+`npm run poc:keepalive`（= `node tests/poc/keepalive-poc.mjs`）在真实浏览器上验证保活，与 #18 的 A–F 场景对应：
+
+| 场景 | 内容 |
+| --- | --- |
+| A | 建立连接后不发任何消息，观察至少 90s：Worker 是否被回收、socket 何时断开 |
+| B | 每 20s 一次 KEEPALIVE，连续至少 10 分钟：worker 与 socket 是否持续可用 |
+| C2 | 长时间无业务 Job 后 GET_STATUS / 无副作用 EXECUTE 是否立即成功，且 Bridge 从未应答 KEEPALIVE |
+| D | 停止 KEEPALIVE 后，记录 Chrome 的实际 idle 回收时间 |
+| E | RUNNING 的 Job 跨越多个 keepalive 周期：不返回 BUSY、jobId 不被改写、原 Job 正常 RESULT |
+| F | NOT_READY（无 Tab / 多 Tab）期间：状态不变、不创建 Tab、不任选一个、socket 仍可达 |
+| G | Service 断开：发送循环被清理且无残留定时器；重连后保活恢复 |
+
+它只读 `CDP /json/list` 元数据，**从不附着 Worker DevTools**（附着会让 Worker 一直存活，使测量失去意义），也不在保活窗口内跑 GET_STATUS/EXECUTE 探针。证据写在 `docs/research/evidence/keepalive-poc.json`，含环境、提交、时序与未覆盖项；`npm run poc` 的 12 个 V1 场景不受影响。

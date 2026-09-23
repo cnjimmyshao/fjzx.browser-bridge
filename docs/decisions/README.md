@@ -8,6 +8,6 @@
 
 ## 索引
 
-- [ADR 0001：由 Service 维持 Bridge WebSocket 活动](0001-service-keepalive.md)——方向已确认，实施与当前版本验证待完成；不表示正式能力已落地。
+- [ADR 0001：由 Service 维持 Bridge WebSocket 活动](0001-service-keepalive.md)——方向已确认，机制已实现并有当前版本真实验证；不代表维护者已验收或允许合并。
 
 决定改变时保留旧决定的历史语义，链接新的替代决定，并同步受影响的 Current、代码和测试。仅添加 ADR 不代表实现、Review 或验收完成。
