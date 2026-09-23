@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { arch, platform, release } from 'node:os';
+import { arch, platform, release, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,8 +30,9 @@ import { startTestPageServer } from './page-server.mjs';
  * timestamped evidence rather than a claim that "it looked connected".
  *
  *   node tests/poc/keepalive-poc.mjs [--browser <chrome.exe>] [--headed]
- *                                    [--port 9333] [--keepalive-seconds 600]
+ *                                    [--port 9611] [--keepalive-seconds 600]
  *                                    [--baseline-seconds 100] [--phases A,B,C,...]
+ *                                    [--smoke] [--evidence <path>]
  *
  * Deliberate measurement constraints, so the numbers mean something:
  *
@@ -56,7 +57,9 @@ const EXTENSION_NAME = 'Browser Bridge';
 
 /** Defaults follow #18: >= 10 minutes of keepalive, >= 90s baseline windows. */
 const DEFAULTS = {
-  port: 9333,
+  // Deliberately not 9222/9333: those are where other tooling and other POC runs put
+  // a browser, and `launchBrowser` refuses to adopt a port it does not own.
+  port: 9611,
   headed: false,
   browser: undefined,
   keepaliveSeconds: 600,
@@ -74,6 +77,7 @@ function parseArgs(argv) {
     if (argv[i] === '--browser') options.browser = next();
     else if (argv[i] === '--port') options.port = Number(next());
     else if (argv[i] === '--headed') options.headed = true;
+    else if (argv[i] === '--smoke') options.smoke = true;
     else if (argv[i] === '--keepalive-seconds') options.keepaliveSeconds = Number(next());
     else if (argv[i] === '--baseline-seconds') options.baselineSeconds = Number(next());
     else if (argv[i] === '--stop-seconds') options.stopSeconds = Number(next());
@@ -87,6 +91,17 @@ function parseArgs(argv) {
     } else if (argv[i].startsWith('--')) {
       throw new Error(`未知参数：${argv[i]}`);
     }
+  }
+
+  if (options.smoke) {
+    // A short walk through every phase, so a broken scenario is found in two minutes
+    // instead of after the ten-minute window. It must never be mistaken for the
+    // verification run, hence the evidence default and the recorded limitation.
+    options.keepaliveSeconds = 60;
+    options.baselineSeconds = 100;
+    options.stopSeconds = 100;
+    options.reconnectDownSeconds = 10;
+    options.evidence = join(tmpdir(), 'keepalive-poc-smoke.json');
   }
   return options;
 }
@@ -195,7 +210,15 @@ const result = {
   },
   options: null,
   browserVersion: null,
+  /**
+   * `commit` is what HEAD was when this run started; `workingTreeDirty` is
+   * `git status --porcelain` at the same moment. Together they say which revision
+   * the loaded `src/` actually was: a run started before a documentation-only commit
+   * would otherwise look like it tested the wrong code, and a run with a modified
+   * extension would look like it tested a commit.
+   */
   commit: null,
+  workingTreeDirty: null,
   phases: [],
   timings: {},
   events,
@@ -206,6 +229,15 @@ const result = {
 function commitSha() {
   try {
     return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/** `git status --porcelain`, so a reader can tell whether "this checkout" is a commit. */
+function workingTreeStatus() {
+  try {
+    return execFileSync('git', ['status', '--porcelain'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
   } catch {
     return null;
   }
@@ -225,15 +257,24 @@ function baseLimitations(options, headless) {
     ...(options.keepaliveSeconds < 600
       ? [`本次保活窗口被参数缩短为 ${options.keepaliveSeconds}s，不足 #18 要求的 10 分钟，不能据此声称 10 分钟保活已通过。`]
       : []),
+    ...(options.smoke
+      ? ['本次为 --smoke 短窗口试跑，只用于确认 harness 本身跑得通，不是保活验证结果。']
+      : []),
   ];
 }
 
 function writeEvidence() {
   result.evidencePath = options.evidence;
   try {
+    // A run whose evidence cannot be written is a run that proves nothing, and the
+    // default path lives in a directory that may not exist yet in a fresh checkout.
+    mkdirSync(dirname(options.evidence), { recursive: true });
     writeFileSync(options.evidence, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
+    return true;
   } catch (error) {
     console.error(`  证据写入失败：${error.message}`);
+    result.evidenceWriteFailed = error.message;
+    return false;
   }
 }
 
@@ -335,6 +376,7 @@ async function wakeWorker(phaseName) {
 const options = parseArgs(process.argv.slice(2));
 result.options = options;
 result.commit = commitSha();
+result.workingTreeDirty = workingTreeStatus() || '';
 result.remainingLimitations = baseLimitations(options, !options.headed);
 const wanted = (name) => options.phases.includes(name);
 const exe = findBrowser(options.browser);
@@ -393,17 +435,29 @@ try {
         timeoutMs: options.baselineSeconds * 1000,
       });
       const reclaim = window.transitions.find((t) => t.workerPresent === false);
+      const socketDropped = window.transitions.find((t) => t.socketOpen === false);
       result.timings.baselineReclaimMs = reclaim ? reclaim.t : null;
+      result.timings.baselineSocketDropMs = socketDropped ? socketDropped.t : null;
       record('A', 'baseline-window', {
         durationMs: window.durationMs,
         reclaims: reclaimsIn(window),
+        socketDrops: window.transitions.filter((t) => t.socketOpen === false).length,
+        socketDroppedAfterMs: result.timings.baselineSocketDropMs,
         workerTargetsSeen: [...new Set(window.samples.map((s) => s.workerTargets))],
       });
-      check(entry, 'A 基线：无 WebSocket 活动时 worker 被回收', reclaim !== undefined, {
+      // Both halves are recorded through `check`, not only printed: the evidence file
+      // is the record a reviewer reads, so an assertion that never reaches it is an
+      // assertion the file does not actually claim.
+      check(entry, 'A 基线：无 WebSocket 活动时 Worker 被回收', reclaim !== undefined, {
         reclaimAfterMs: reclaim ? reclaim.t : null,
         openConnectionsAtStart: before,
       });
-      check(entry, 'A 基线：socket 随 worker 一起断开', service.openCount() === 0);
+      check(
+        entry,
+        'A 基线：socket 随 Worker 一起断开，且未重连',
+        socketDropped !== undefined && service.openCount() === 0,
+        { socketDroppedAfterMs: result.timings.baselineSocketDropMs },
+      );
     });
   }
 
@@ -666,6 +720,21 @@ try {
     phasesFailed: result.phases.filter((entry) => !entry.ok).length,
     durationMs: Date.now() - STARTED_AT,
   };
+
+  // Self-consistency: the evidence file is the record a reviewer reads, so an
+  // assertion that a phase counted but did not hand to `check` would silently shrink
+  // what the file claims was verified. Fail loudly instead of writing a record that
+  // is quietly thinner than the run.
+  const assertionsRun = result.phases.reduce((total, entry) => total + entry.assertions.length, 0);
+  result.summary.assertionsRun = assertionsRun;
+  result.summary.assertionsRecorded = result.checks.length;
+  if (assertionsRun !== result.checks.length) {
+    result.evidenceIncomplete =
+      `阶段共记录 ${assertionsRun} 条断言，但证据文件只收到 ${result.checks.length} 条；` +
+      '有断言绕过了 check()，本文件不完整。';
+    console.error(`  ✖ ${result.evidenceIncomplete}`);
+  }
+
   result.finishedAt = new Date().toISOString();
   writeEvidence();
   console.log(`\n  证据：${options.evidence}`);
@@ -698,9 +767,13 @@ try {
 
   // A failed phase only fails the run when it was about the mechanism itself. The
   // scenarios that depend on a live worker report their own outcome instead, so the
-  // first real failure is what the exit code reflects.
+  // first real failure is what the exit code reflects. Missing evidence also fails:
+  // the run's whole output is the record a reviewer has to be able to read.
   const fatallyFailed = result.phases.some(
     (entry) => !entry.ok && ['A', 'B', 'D'].includes(entry.phase),
   );
-  process.exitCode = fatallyFailed || result.summary?.fatal ? 1 : 0;
+  process.exitCode =
+    fatallyFailed || result.summary?.fatal || result.evidenceWriteFailed || result.evidenceIncomplete
+      ? 1
+      : 0;
 }

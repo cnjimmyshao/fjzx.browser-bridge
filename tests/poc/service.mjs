@@ -104,10 +104,11 @@ export async function startTestService(options = {}) {
   const keepaliveSends = [];
 
   function sendKeepalive() {
+    // Pure send accounting. What came *back* is read from `received` by whoever
+    // asserts on it, which keeps this record to what the Service actually knows here.
     const at = Date.now();
-    const before = received.length;
     send({ type: 'KEEPALIVE' });
-    keepaliveSends.push({ at, openConnections: server.openCount(), repliesBefore: before });
+    keepaliveSends.push({ at, openConnections: server.openCount() });
   }
 
   /**
