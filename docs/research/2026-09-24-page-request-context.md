@@ -36,7 +36,7 @@ npm run poc       # V1 端到端 + Page Context 三个附加场景（18/18）
 npm run poc:context  # 请求上下文（16/16）
 ```
 
-证据文件：`docs/research/evidence/page-request-context.json`（本次 `poc:context` 运行自动写入，只含 cookie **名字**与掩码串，不含值）。本次 `npm run poc` 的输出即终端结果本身，未另存文件；下表逐条列出观察到的结果。
+证据文件：`docs/research/evidence/page-request-context.json`（本次 `poc:context` 运行自动写入）。它只含 cookie **名字**与掩码串、不含 cookie 值；环境只记录平台、Node 版本与浏览器 build（以 UA 表示），不写入本机绝对路径或用户名——这个文件会被提交，绝对路径等于把运行者的目录结构与用户名带出机器。本次 `npm run poc` 的输出即终端结果本身，未另存文件；下表逐条列出观察到的结果。
 
 ## 结果
 
@@ -47,10 +47,11 @@ npm run poc:context  # 请求上下文（16/16）
 | 成功 RESULT 的 `pageContext` | `available: true`；`workTabUrl` 等于页面自身的 `location.href`，`userAgent`、`documentReferrer` 等于页面自身报告值；`documentId = EBE8C4C6B3C4D1EAC1281762ECED00E1` |
 | 字段集合 | 只有 `available`/`workTabUrl`/`userAgent`/`documentReferrer`/`documentId`，没有 Cookie 或 target-specific 字段 |
 | 同一 URL 重载 | 重载后 `documentId` 与重载前不同，`workTabUrl` 不变；说明它标识文档而不是 URL |
-| 导航竞争（脚本内 `location.reload()` 后立刻返回） | Job 仍 `ok: true`，`pageContext.available: false`、`reason: PAGE_FACTS_UNAVAILABLE` —— 注入与导航相撞时如实降级，没有拼出混合事实 |
+| 导航竞争（脚本内 `location.reload()` 后立刻返回） | Job 仍 `ok: true`；两次运行各观察到一种结果：一次 `pageContext.available: false`、`reason: PAGE_FACTS_UNAVAILABLE`（注入与导航相撞），一次 `available: true` 且 `documentId` 属于重载前或重载后的已知文档之一 —— 两种情况都没有拼出混合事实 |
+| Work Tab 绑定在取样期间变化 | 取样前后各复验一次绑定（`settled()` + 当前绑定）；快照已经不再是 Work Tab 时按 `WORK_TAB_UNAVAILABLE` 降级，且不去读页面（单测覆盖，真实浏览器未构造并发开 Tab 的时序） |
 | V1 原有行为 | 12 个场景全通过，未回归 |
 
-本次运行只观察到竞争场景的降级分支，没有观察到"竞争期间仍取到某一个文档事实"的分支；场景断言同时接受两种结果（可用时必须属于重载前或重载后的某个已知 `documentId`）。
+本次运行只观察到竞争场景的降级分支，没有观察到"竞争期间仍取到某一个文档事实"的分支；场景断言同时接受两种结果（可用时必须属于重载前或重载后的某个已知 `documentId`）。第二次运行观察到的是另一种结果（见上表）：断言覆盖两种走向，但单次运行只会落在其中一个。
 
 ### Request Context（`npm run poc:context`，16/16 通过）
 
@@ -87,7 +88,7 @@ npm run poc:context  # 请求上下文（16/16）
 ## 限制与未测
 
 - 只在一个 Chrome for Testing 版本（153.0.8010.52）与 Windows 上实测。Chrome < 130 的分区降级路径（`exactPartitionSelection: false`）**未在真实浏览器验证**，只有单测覆盖。
-- 导航竞争场景本次只观察到降级分支；"竞争期间取到旧文档或新文档事实"的分支未在本次运行中出现。
+- 导航竞争场景每次运行只会落在"如实降级"或"取到某一个已知文档"其中之一；两次运行分别命中过一次，但单次运行不能同时覆盖两种走向。
 - 传输层指纹（TLS/HTTP2）与出口 IP 不在 Bridge 能力范围，本次未测也不承诺。
 - `hostAccessCoverage` 的 `'origin'`/`'unknown'` 分支未在真实浏览器构造（需要人工收窄站点授权），只有单测覆盖。
 - 本报告不覆盖 MV3 Worker 空闲回收（见 [既有浏览器观察](2026-09-23-existing-browser-evidence.md)）。

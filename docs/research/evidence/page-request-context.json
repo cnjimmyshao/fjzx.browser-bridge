@@ -1,13 +1,14 @@
 {
-  "at": "2026-09-24T07:39:51.458Z",
+  "at": "2026-09-24T07:56:42.642Z",
   "issue": 25,
-  "extension": "D:\\nodejs\\com.fajiezhixin.browser-bridge.issue25\\src",
+  "extension": "src",
   "environment": {
-    "browser": "C:\\Users\\shaoning\\AppData\\Local\\chrome-for-testing-153\\chrome-win64\\chrome.exe",
+    "platform": "win32 10.0.26200 x64",
+    "node": "v26.7.0",
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
   },
-  "service": "ws://127.0.0.1:56253",
-  "origin": "http://127.0.0.1:56252",
+  "service": "ws://127.0.0.1:52186",
+  "origin": "http://127.0.0.1:52185",
   "summary": {
     "total": 16,
     "passed": 16,
@@ -101,7 +102,7 @@
           "sec-fetch-site": "same-origin",
           "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
         },
-        "referer": "http://127.0.0.1:56252/feed",
+        "referer": "http://127.0.0.1:52185/feed",
         "cookieNames": [
           "sid",
           "theme",
@@ -149,7 +150,7 @@
           }
         ],
         "userAgentSource": "work-tab-page",
-        "observedAt": "2026-09-24T07:39:49.397Z"
+        "observedAt": "2026-09-24T07:56:40.573Z"
       }
     },
     {
@@ -157,7 +158,7 @@
       "detail": {
         "status": 200,
         "bytes": 65536,
-        "digest": "ab0871293019690f4a8f0b92803b96e2e9fdd8cbcbf39b6f4f3cc343674a4955"
+        "digest": "6ddfad09692098328c65f24cdd2c122862cac548d0b87e53231eb372a81d6ba9"
       }
     },
     {
@@ -208,10 +209,10 @@
     {
       "name": "EXECUTE → 资源 URL → 请求上下文 → Node 重放",
       "detail": {
-        "discovered": "http://127.0.0.1:56252/media/1",
-        "workTabUrl": "http://127.0.0.1:56252/feed",
+        "discovered": "http://127.0.0.1:52185/media/1",
+        "workTabUrl": "http://127.0.0.1:52185/feed",
         "status": 200,
-        "digest": "ab0871293019690f4a8f0b92803b96e2e9fdd8cbcbf39b6f4f3cc343674a4955"
+        "digest": "6ddfad09692098328c65f24cdd2c122862cac548d0b87e53231eb372a81d6ba9"
       }
     }
   ]

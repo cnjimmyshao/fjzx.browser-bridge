@@ -342,6 +342,7 @@ Bridge 不因这两种能力理解任何网站、媒体或业务语义：它只�
 规则：
 
 - **取样时机**：Job 执行完成之后、RESULT 推送之前。`pageContext` 描述的是 Service 接下来要面对的那个页面，而不是脚本执行前的页面。
+- **取样前后都复验 Work Tab 绑定。** Work Tab 管理器在 `tabs.query()` 返回前会继续显示上一个绑定，因此取样前先等当前快照（`settled()`），读取后再复验一次；期间出现第二个普通 Tab 或绑定消失时，本次取样按 `WORK_TAB_UNAVAILABLE` 降级，而不是给出一个已经不再属于 Work Tab 的页面快照。
 - **一次读取就是一个文档快照。** 四个字段来自**同一次**注入读取，`location.href`、`navigator.userAgent`、`document.referrer` 与 `documentId` 不可能来自不同文档；导航发生在读取之前或之后只改变"描述的是哪个文档"，不会拼出混合事实。页面正在导航而注入失败时，按上面的降级语义如实报告，而不是拼两个文档。
 - **取样失败不影响 Job 结果。** Job 真的执行成功了，读页面失败不能把它改写成失败；`ok` 只回答"JavaScript 是否正常执行"。
 - **字段级缺失不伪造。** 浏览器不给 `documentId` 就是 `null`；`document.referrer` 为空字符串就是空字符串。

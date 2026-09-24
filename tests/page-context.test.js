@@ -214,10 +214,10 @@ function createFakeConnection() {
  * A bridge whose request context is real (stub `chrome.cookies`, so every read is
  * visible) and whose page context is either given or a working stub.
  */
-function createHarness({ pageContext, executor = async () => 'ok' } = {}) {
+function createHarness({ pageContext, executor = async () => 'ok', workTab: workTabOverride } = {}) {
   const connection = createFakeConnection();
   const cookies = [];
-  const workTab = { isBound: true, tabId: 5, reason: null };
+  const workTab = workTabOverride ?? { isBound: true, tabId: 5, reason: null };
   const bridge = createBridgeState({
     connection,
     workTab,
@@ -240,7 +240,7 @@ function createHarness({ pageContext, executor = async () => 'ok' } = {}) {
     }),
     logger: {},
   });
-  return { bridge, connection, cookies };
+  return { bridge, connection, cookies, workTab };
 }
 
 const execute = (jobId) => JSON.stringify({ type: 'EXECUTE', jobId, script: 'return 1;' });
@@ -297,4 +297,81 @@ test('an ordinary EXECUTE reads page facts and no target-specific cookie', async
 
   assert.equal(h.connection.sent.at(-1).pageContext.available, true, '页面事实应已读取');
   assert.deepEqual(h.cookies, [], '不调用 GET_REQUEST_CONTEXT 时不得查询任何 cookie');
+});
+
+/**
+ * A Work Tab whose binding is still visible while a refresh is in flight, exactly
+ * like the real manager: `settled()` resolves the pending `tabs.query()` first.
+ *
+ * @param {Array<{isBound: boolean, tabId: number | null, reason: string | null}>} snapshots
+ *   what each `settled()` call settles on; the last one repeats.
+ */
+function createRefreshingWorkTab(snapshots) {
+  let index = 0;
+  let state = { isBound: true, tabId: 5, reason: null };
+  const settledCalls = [];
+  return {
+    get isBound() {
+      return state.isBound;
+    },
+    get tabId() {
+      return state.tabId;
+    },
+    get reason() {
+      return state.reason;
+    },
+    settledCalls,
+    /** The visible binding right now, before the pending query answers. */
+    get visible() {
+      return state;
+    },
+    async settled() {
+      settledCalls.push(index);
+      state = snapshots[Math.min(index, snapshots.length - 1)];
+      index += 1;
+    },
+  };
+}
+
+test('a Work Tab snapshot that is still refreshing decides whether the page is sampled', async () => {
+  // A second ordinary tab appeared while the Job ran: until the tab query answers,
+  // the previous binding is still visible. Sampling now would answer with page facts
+  // for a tab that is no longer the Work Tab.
+  const scripting = createStubScripting();
+  const workTab = createRefreshingWorkTab([{ isBound: false, tabId: null, reason: 'MULTIPLE_TABS' }]);
+  const h = createHarness({
+    workTab,
+    pageContext: createPageContextSource({ scripting, logger: {} }),
+  });
+
+  await h.bridge.handleMessage(execute('job-6'));
+
+  const result = h.connection.sent.at(-1);
+  assert.equal(result.ok, true, 'Job 仍然成功');
+  assert.deepEqual(
+    result.pageContext,
+    unavailablePageContext(PAGE_CONTEXT_REASONS.WORK_TAB_UNAVAILABLE),
+  );
+  assert.deepEqual(scripting.calls, [], '快照已经不再是 Work Tab 时不应去读页面');
+});
+
+test('a tab set change during the page read withholds the facts instead of mixing snapshots', async () => {
+  const scripting = createStubScripting();
+  const workTab = createRefreshingWorkTab([
+    { isBound: true, tabId: 5, reason: null }, // before the read: still the Work Tab
+    { isBound: false, tabId: null, reason: 'MULTIPLE_TABS' }, // by the time it answers
+  ]);
+  const h = createHarness({
+    workTab,
+    pageContext: createPageContextSource({ scripting, logger: {} }),
+  });
+
+  await h.bridge.handleMessage(execute('job-7'));
+
+  assert.equal(scripting.calls.length, 1, '读取本身照常发生');
+  assert.deepEqual(
+    h.connection.sent.at(-1).pageContext,
+    unavailablePageContext(PAGE_CONTEXT_REASONS.WORK_TAB_UNAVAILABLE),
+  );
+  assert.equal(workTab.settledCalls.length, 2, '读取前后各复验一次绑定');
 });

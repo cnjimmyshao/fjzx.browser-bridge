@@ -187,31 +187,60 @@ export function createBridgeState({
   }
 
   /**
+   * Is `tabId` still the bound Work Tab, once any in-flight refresh has settled?
+   *
+   * The manager deliberately keeps the previous binding visible until its
+   * `tabs.query()` answers, so a snapshot read right now can be one that the tab
+   * set has already invalidated: a second ordinary tab makes Bridge NOT_READY, and
+   * the tab a Job just ran on stops being "the Work Tab" at that moment.
+   *
+   * Both paths that answer with page data ask this question — before reading, so a
+   * stale binding is never sampled, and again after reading, so a change during the
+   * read is not answered with facts that no longer describe the current Work Tab.
+   */
+  async function isStillTheWorkTab(tabId) {
+    if (typeof workTab.settled === 'function') {
+      try {
+        await workTab.settled();
+      } catch (error) {
+        logger.warn?.('[bridge] waiting for the work tab snapshot failed', error);
+      }
+    }
+    return workTab.isBound && workTab.tabId === tabId;
+  }
+
+  /**
    * The page facts that go with a Job that ran.
    *
    * Never fails and never throws: the Job did run, so nothing about reading the
    * page may turn its RESULT into an error. When the page cannot be described —
-   * the Work Tab was closed, or its document could not be read — the answer says
-   * so explicitly instead of leaving a Service to guess whether the field is
-   * missing or the page had no facts.
+   * the Work Tab is no longer the tab the Job ran on, or its document could not be
+   * read — the answer says so explicitly instead of leaving a Service to guess
+   * whether the field is missing or the page had no facts.
    *
    * No cookie is read on this path. A page context is page facts, so an ordinary
    * EXECUTE never turns into a target-specific query.
    */
   async function samplePageContext(tabId) {
-    if (!workTab.isBound || workTab.tabId !== tabId) {
+    if (!(await isStillTheWorkTab(tabId))) {
       return unavailablePageContext(PAGE_CONTEXT_REASONS.WORK_TAB_UNAVAILABLE);
     }
     if (pageContext === undefined || pageContext === null || typeof pageContext.read !== 'function') {
       return unavailablePageContext(PAGE_CONTEXT_REASONS.PAGE_FACTS_UNAVAILABLE);
     }
+
+    let context;
     try {
-      const context = await pageContext.read({ tabId });
-      return context ?? unavailablePageContext(PAGE_CONTEXT_REASONS.PAGE_FACTS_UNAVAILABLE);
+      context = await pageContext.read({ tabId });
     } catch (error) {
       logger.warn?.('[bridge] reading the page context failed', error);
       return unavailablePageContext(PAGE_CONTEXT_REASONS.PAGE_FACTS_UNAVAILABLE);
     }
+
+    if (!(await isStillTheWorkTab(tabId))) {
+      return unavailablePageContext(PAGE_CONTEXT_REASONS.WORK_TAB_UNAVAILABLE);
+    }
+    return context ?? unavailablePageContext(PAGE_CONTEXT_REASONS.PAGE_FACTS_UNAVAILABLE);
   }
 
   /**
@@ -285,19 +314,7 @@ export function createBridgeState({
     // while it runs: a second ordinary tab makes Bridge NOT_READY for exactly this
     // request. Answering anyway would disclose a context sampled from a tab it can
     // no longer identify — data the Service could not have obtained a moment later.
-    //
-    // A refresh may still be in flight (the manager deliberately keeps the previous
-    // binding visible until its `tabs.query()` answers), so the current snapshot is
-    // awaited first; otherwise this check would read the stale binding it is meant
-    // to catch.
-    if (typeof workTab.settled === 'function') {
-      try {
-        await workTab.settled();
-      } catch (error) {
-        logger.warn?.('[bridge] waiting for the work tab snapshot failed', error);
-      }
-    }
-    if (!workTab.isBound || workTab.tabId !== sampledTabId) {
+    if (!(await isStillTheWorkTab(sampledTabId))) {
       reply(
         createRequestContextError(
           message.requestId,

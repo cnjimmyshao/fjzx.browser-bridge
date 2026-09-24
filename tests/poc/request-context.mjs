@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { arch, release } from 'node:os';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -540,10 +541,17 @@ try {
       {
         at: new Date().toISOString(),
         issue: 25,
-        extension: EXTENSION_ROOT,
-        // Environment, because a browser observation without one is not evidence:
-        // the user agent names the Chrome build the run used.
-        environment: { browser: exe, userAgent: pageUserAgent },
+        // Repo-relative, and the browser named by its build rather than by where it
+        // happens to be installed: this file is committed, and an absolute path
+        // carries the runner's user name and directory layout out of the machine.
+        extension: relative(REPO_ROOT, EXTENSION_ROOT),
+        environment: {
+          platform: `${process.platform} ${release()} ${arch()}`,
+          node: process.version,
+          // Names the Chrome build the run used; a browser observation without a
+          // version is not evidence.
+          userAgent: pageUserAgent,
+        },
         service: service?.url ?? null,
         origin: protectedSite?.origin ?? null,
         summary: { total: results.length, passed: results.length - failed.length, failed: failed.map((entry) => entry.name) },
