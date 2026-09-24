@@ -16,7 +16,10 @@ Current Version: V1
 
 这些是既有材料间的边界，不在本次整理中代作技术决定：
 
-- **MV3 空闲可达性：** #9 报告空闲回收，#18 报告 20s KEEPALIVE 的候选 POC。既有架构仍列四种核心消息；不能把 Research 中的建议自动当成已经批准的正式协议。证据、观测干扰和复现限制见 [浏览器观察整理](../research/2026-09-23-existing-browser-evidence.md)。相关技术任务继续独立处理。
 - **metadata：** 架构原文称其为“Service 透传信息；Bridge 不解释”，原 README 则说明仅接收、不解释、也不转发。`RESULT` 示例没有该字段。本次保留原 Contract 与既有实现说明，不新增回传承诺；需要依赖 metadata 流向的任务应先明确其语义。
 
 决定形成后按 AGENTS 的交接规则同步 Current；此处不是另一套维护者决定记录。
+
+## 已落地的决定
+
+- **MV3 空闲可达性与 KEEPALIVE：** #9 报告空闲回收，#18 报告 20s KEEPALIVE 的候选 POC，维护者同意了「Service 每 20 秒发送 `{"type":"KEEPALIVE"}`、Bridge 只识别并保持沉默」的方向（[ADR 0001](../decisions/0001-service-keepalive.md)）。该机制已按 §3.1 / §8.7 写入本目录，并有实现、Node 回归与真实浏览器证据。它**不**承诺唤醒已回收的 worker，也不覆盖浏览器退出、休眠或网络中断；实测环境与未覆盖项见 [Research](../research/README.md)。

@@ -296,6 +296,109 @@ test('an unknown type without a jobId is silently ignored', async () => {
   assert.deepEqual(h.connection.sent, []);
 });
 
+const keepalive = () => JSON.stringify({ type: 'KEEPALIVE' });
+
+test('KEEPALIVE produces no message, no Job and no state change', async () => {
+  const h = createHarness();
+
+  await assert.doesNotReject(() => h.bridge.handleMessage(keepalive()));
+
+  // The whole point of the frame is the arrival itself: an answer, a Job slot or a
+  // state transition would all be new promises nobody asked for.
+  assert.deepEqual(h.connection.sent, [], 'KEEPALIVE 不得产生任何应答');
+  assert.deepEqual(h.executor.calls, [], 'KEEPALIVE 不得执行脚本');
+  assert.equal(h.bridge.currentJobId, null);
+  assert.equal(h.bridge.state, BRIDGE_STATES.IDLE);
+  assert.deepEqual(h.states, [], 'KEEPALIVE 不得触发状态变化');
+});
+
+test('KEEPALIVE during RUNNING leaves the Job, its jobId and its RESULT alone', async () => {
+  const h = createHarness();
+  const handling = h.bridge.handleMessage(execute('job-ka-running'));
+  await flush();
+  assert.equal(h.bridge.state, BRIDGE_STATES.RUNNING);
+
+  // Four frames across the wait, i.e. the shape of a 20s keepalive inside a Job
+  // that takes over a minute: none of them may answer BUSY or disturb the Job.
+  for (let i = 0; i < 4; i += 1) {
+    await h.bridge.handleMessage(keepalive());
+    await flush();
+  }
+
+  assert.deepEqual(h.connection.sent, [], 'Job 期间 KEEPALIVE 不得回 BUSY 或 RESULT');
+  assert.equal(h.bridge.currentJobId, 'job-ka-running');
+  await h.bridge.handleMessage(JSON.stringify({ type: 'GET_STATUS' }));
+  assert.deepEqual(h.connection.sent.at(-1), {
+    type: 'STATUS',
+    state: 'RUNNING',
+    jobId: 'job-ka-running',
+  });
+  assert.deepEqual(h.executor.calls.map((call) => call.script), ['return 1;']);
+
+  await h.executor.settle('done');
+  await handling;
+  assert.deepEqual(h.connection.sent.at(-1), {
+    type: 'RESULT',
+    jobId: 'job-ka-running',
+    ok: true,
+    data: 'done',
+  });
+});
+
+test('KEEPALIVE during NOT_READY changes neither the state nor the reason', async () => {
+  const h = createHarness({
+    workTab: createFakeWorkTab({ isBound: false, tabId: null, reason: 'MULTIPLE_TABS' }),
+  });
+
+  await h.bridge.handleMessage(keepalive());
+
+  assert.deepEqual(h.connection.sent, []);
+  assert.equal(h.bridge.state, BRIDGE_STATES.NOT_READY);
+  assert.equal(h.bridge.notReadyReason, 'MULTIPLE_TABS', '不得替 Service 任选一个 Tab');
+  assert.deepEqual(h.states, []);
+
+  await h.bridge.handleMessage(JSON.stringify({ type: 'GET_STATUS' }));
+  assert.deepEqual(h.connection.sent, [
+    { type: 'STATUS', state: 'NOT_READY', reason: 'MULTIPLE_TABS' },
+  ]);
+});
+
+test('KEEPALIVE does not swallow or interleave with a GET_STATUS answer', async () => {
+  const h = createHarness();
+  const status = h.bridge.handleMessage(JSON.stringify({ type: 'GET_STATUS' }));
+
+  await h.bridge.handleMessage(keepalive());
+  await status;
+
+  assert.deepEqual(
+    h.connection.sent.map((message) => message.type),
+    ['STATUS'],
+    'KEEPALIVE 只能保持沉默',
+  );
+});
+
+test('KEEPALIVE keeps silent when the send would fail', async () => {
+  // The Frame is answered by doing nothing, so a dead connection must not turn it
+  // into a dropped-message warning at keepalive cadence.
+  const h = createHarness({ connection: createFakeConnection({ sendResult: false }) });
+
+  await h.bridge.handleMessage(keepalive());
+
+  assert.deepEqual(h.connection.sent, [], 'KEEPALIVE 不得尝试发送');
+  assert.deepEqual(h.states, []);
+});
+
+test('a frame delivered by a replaced endpoint is dropped whatever its type', async () => {
+  const h = createHarness();
+  h.connection.repoint('ws://other.test');
+
+  await h.bridge.handleMessage(keepalive(), { deliveredOn: 'ws://service.test' });
+
+  assert.deepEqual(h.connection.sent, []);
+  assert.equal(h.bridge.state, BRIDGE_STATES.IDLE);
+  assert.deepEqual(h.states, []);
+});
+
 test('no result history survives a completed Job', async () => {
   const h = createHarness();
   const handling = h.bridge.handleMessage(execute('job-8'));

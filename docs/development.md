@@ -47,7 +47,24 @@ docs/                     Current、Research、Decision 和开发说明
 
    运行器启动本地页面、测试 Service 和独立测试浏览器，通过真实设置页配置 URL，并执行场景。常用参数：`--browser <chrome.exe>`、`--port <调试端口>`、`--headed`。场景与验收映射见 [架构文档第 13 节](current/architecture.md#13-poc-与本文档的对应)；以本次实际输出为准，不沿用旧 README 的场景数量、耗时或 PASS 数。
 
+4. 运行保活 POC（可选，耗时较长）：
+
+   ```powershell
+   npm run poc:keepalive
+   # 等价于 node tests/poc/keepalive-poc.mjs
+   ```
+
+   默认跑 A、B、C2、D、E、F、G 全部场景，其中 B 是 10 分钟保活窗口，整轮约 15–18 分钟。参数：`--keepalive-seconds`、`--baseline-seconds`、`--stop-seconds`、`--reconnect-down-seconds`、`--phases A,B,...`、`--evidence <path>`。场景含义与证据字段见 [架构文档第 13.1 节](current/architecture.md#131-保活31--87的-poc-对应)。
+
+   `--phases` 只接受依赖完整的子集：C2/D 需要 B，F/G 需要 E（分别复用它们建立的保活循环与状态）。`--phases C2` 这类调用会在启动前被拒绝，而不是跑出一份「没发送过一条 KEEPALIVE 却显示通过」的结果。
+
+   先用 `--smoke` 跑一遍更省时间：它把三个窗口缩短到 100s/60s/100s，并强制把证据写到临时目录，因此一次约 4 分钟就能确认整条场景编排没坏。它的结果**不是**保活验证，证据文件里也会写明这一点。
+
+   > `--evidence` 默认覆盖 `docs/research/evidence/keepalive-poc.json`；用短窗口或子集试跑时请指定别的路径（`--smoke` 已自动如此），否则会把缩水的运行写进证据文件。
+
 只使用独立测试 Profile 和本机测试页面，不依赖第三方网站或真实账号。不得把日常登录态、Cookie 或 Profile 目录提交到仓库。
+
+> POC harness 需要能加载未打包扩展的浏览器。Windows 上 Chrome 会把会话交给另一个进程、以退出码 0 结束启动进程，因此 `launchBrowser` 不再把「启动进程退出」本身当作启动失败：只有在调试端口被明确拒绝连接时才据此快速失败。关闭浏览器同时通过 CDP 请求，避免上一个进程已退出、真正持有调试端口的进程仍在运行并锁住 Profile。
 
 ## 手动加载与体验
 
@@ -63,7 +80,9 @@ docs/                     Current、Research、Decision 和开发说明
 4. 打开扩展 Options，保存终端打印的 Service URL；专用 Profile 中只保留一个普通网页作为 Work Tab。
 5. 在终端输入脚本函数体，例如 `return document.title`；`:status` 请求当前状态，`:input <json>` 设置后续输入，`:quit` 退出。
 
-不加 `--interactive` 时测试 Service 打印往来帧。其他测试客户端的使用方式以测试 Service 的实际接口为准；Bridge 本身仍主动连接 Service。
+测试 Service 启动时会同时启动保活循环，因此终端每 20 秒会看到一条 `→ {"type":"KEEPALIVE"}`。这是必要的：手工会话一旦静默约 30s，Chrome 会回收 Worker 并断开 socket，之后的 `:status` 或脚本就再也到不了 Bridge。不加 `--interactive` 时只打印往来帧，同样带保活。其他测试客户端的使用方式以测试 Service 的实际接口为准；Bridge 本身仍主动连接 Service。
+
+> 保活 POC 自己按场景开关这个循环（见 `tests/poc/keepalive-poc.mjs`），所以基线场景仍然能观察到无活动时的回收。
 
 ### 运行前的一次性设置
 
@@ -77,6 +96,7 @@ Service URL 是唯一必要的持久配置，保存在 `chrome.storage.local`；
 
 - 状态由 current Job 和 Work Tab 就绪情况推导；有 Job 时为 RUNNING，否则按就绪情况为 IDLE 或 NOT_READY。RUNNING 期间新 EXECUTE 返回 BUSY，不排队、不抢占原 Job。
 - 非法 JSON 或没有可用 jobId 的非法帧记录并忽略，不打断连接；失败帧仍有可用 jobId 时用 SCRIPT_EXECUTION_FAILED 返回 RESULT。
+- KEEPALIVE 被显式识别后静默处理：不产生任何应答、不占 Job、不改变三态、不读写 Work Tab 绑定。它与其他入站帧一样在 Work Tab 评估就绪（`settled()`）后按类型直接返回——复位发生在浏览器**收到**消息时，因此不需要为它做一条绕过就绪等待的快路径。见 [Current §8.7](current/architecture.md#87-keepalive)。
 - input 原样交给脚本。原 README 说明 metadata 仅接收、不解释、不转发；架构措辞尚需澄清，见 [Current 阅读边界](current/README.md#整理时保留的待澄清点)。不要从“透传”自行推导新增 RESULT 字段。
 - RESULT.ok 是技术执行成功，不是业务成功；没有 Job Queue、History、Retry、幂等或 Exactly Once 的新增承诺。
 
@@ -115,4 +135,4 @@ return { title, out: document.getElementById('out').textContent };
 
 原 README 同时写过“任何路径都不会留下无人管理的活连接”与上述有界关闭说明；排障时须区分管理状态、事件处理和底层 socket 存活，不能据一句概括扩大保障。
 
-重连并不证明 Worker 永不被回收，也不自动恢复已经失去的 Worker。MV3 空闲回收及 KEEPALIVE POC 见 [Research](research/2026-09-23-existing-browser-evidence.md)，未决协议事项仍按相关 Issue 处理，不从本文推导新 heartbeat、认证、消息持久化、离线队列或 Job 重放。
+重连并不证明 Worker 永不被回收，也不自动恢复已经失去的 Worker。MV3 空闲回收的机制、Service 侧 20s KEEPALIVE 的已确认方案与保证边界见 [Current §3.1](current/architecture.md#31-mv3-空闲回收与-service-保活keepalive) 与 [ADR 0001](decisions/0001-service-keepalive.md)；本文不据此推导新的 heartbeat、认证、消息持久化、离线队列或 Job 重放。

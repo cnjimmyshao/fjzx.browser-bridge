@@ -1,10 +1,15 @@
 /**
  * The V1 wire protocol: four message types, three error codes, nothing else.
  *
- * `docs/architecture-v1.md` freezes this set. There is deliberately no separate
- * ERROR message, no ACK, no heartbeat and no job-created/job-finished
+ * `docs/current/architecture.md` freezes this set. There is deliberately no
+ * separate ERROR message, no ACK, no health check and no job-created/job-finished
  * notification, so everything the Service needs to learn arrives as either
  * RESULT (about the job that just ran) or STATUS (about Bridge right now).
+ *
+ * KEEPALIVE is the one addition, and it is deliberately not a fifth answer:
+ * it only carries WebSocket receive activity so Chrome does not reclaim an idle
+ * MV3 worker. Bridge recognises it and does nothing else with it. See
+ * `docs/decisions/0001-service-keepalive.md`.
  *
  * Parsing and building are pure functions of plain data, so the whole contract is
  * exercised by `node --test` without a socket.
@@ -14,6 +19,7 @@
 export const SERVICE_MESSAGE_TYPES = Object.freeze({
   EXECUTE: 'EXECUTE',
   GET_STATUS: 'GET_STATUS',
+  KEEPALIVE: 'KEEPALIVE',
 });
 
 /** Messages Bridge may send to the Service. */
@@ -55,7 +61,10 @@ function isPlainObject(value) {
  * @param {unknown} raw frame payload as received
  * @returns {{
  *   ok: true,
- *   message: {type: string, jobId?: string, script?: string, input?: unknown, metadata?: unknown},
+ *   message:
+ *     | {type: 'EXECUTE', jobId: string, script: string, input?: unknown, metadata?: unknown}
+ *     | {type: 'GET_STATUS'}
+ *     | {type: 'KEEPALIVE'},
  * } | {
  *   ok: false,
  *   failure: string,
@@ -88,6 +97,14 @@ export function parseServiceMessage(raw) {
 
   if (parsed.type === SERVICE_MESSAGE_TYPES.GET_STATUS) {
     return { ok: true, message: { type: SERVICE_MESSAGE_TYPES.GET_STATUS } };
+  }
+
+  // Recognised, and deliberately not validated further: KEEPALIVE carries no
+  // payload by definition, so there is nothing it could get wrong. It is answered
+  // by saying nothing, which is why it must not fall through to the EXECUTE
+  // checks below — any `jobId` on such a frame is not a Job to report on.
+  if (parsed.type === SERVICE_MESSAGE_TYPES.KEEPALIVE) {
+    return { ok: true, message: { type: SERVICE_MESSAGE_TYPES.KEEPALIVE } };
   }
 
   if (parsed.type !== SERVICE_MESSAGE_TYPES.EXECUTE) {

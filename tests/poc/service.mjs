@@ -14,6 +14,15 @@ import { startTestWebSocketServer } from '../helpers/ws-server.js';
 
 const DRAIN_INTERVAL_MS = 20;
 
+/**
+ * The cadence ADR 0001 records for the Service-side keepalive loop.
+ *
+ * Chrome has reset an MV3 worker's idle timer on WebSocket *message* traffic since
+ * 116; keeping the socket open is not activity. 20s leaves room under the ~30s idle
+ * window the POC baseline measures.
+ */
+export const KEEPALIVE_INTERVAL_MS = 20000;
+
 /** @param {{port?: number, log?: Function}} [options] */
 export async function startTestService(options = {}) {
   const { port = 0, log = () => {} } = options;
@@ -90,6 +99,40 @@ export async function startTestService(options = {}) {
     return `${prefix}-${sequence}`;
   }
 
+  /** The Service owns the keepalive loop; see ADR 0001. At most one is running. */
+  let keepaliveTimer = null;
+  const keepaliveSends = [];
+
+  function sendKeepalive() {
+    // Pure send accounting. What came *back* is read from `received` by whoever
+    // asserts on it, which keeps this record to what the Service actually knows here.
+    const at = Date.now();
+    send({ type: 'KEEPALIVE' });
+    keepaliveSends.push({ at, openConnections: server.openCount() });
+  }
+
+  /**
+   * Start the keepalive loop, or leave the running one alone.
+   *
+   * Idempotent on purpose: a scenario that wants "keepalive is running" should not
+   * have to know whether an earlier scenario already started it, and two loops on
+   * one connection would double the traffic the ADR specifies.
+   */
+  function startKeepalive(intervalMs = KEEPALIVE_INTERVAL_MS) {
+    if (keepaliveTimer !== null) return false;
+    sendKeepalive();
+    keepaliveTimer = setInterval(sendKeepalive, intervalMs);
+    return true;
+  }
+
+  /** Idempotent, so cleanup paths can call it without knowing whether it started. */
+  function stopKeepalive() {
+    if (keepaliveTimer === null) return false;
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+    return true;
+  }
+
   return {
     port: server.port,
     url: server.url,
@@ -162,9 +205,22 @@ export async function startTestService(options = {}) {
      * "the Service went away and came back".
      */
     async stop() {
+      // The keepalive loop belongs to the connection lifecycle, so it is cleaned up
+      // here rather than left for the process to exit around: a leaked interval is
+      // both a hanging test process and a Service still talking to nobody.
+      stopKeepalive();
       clearInterval(drain);
       await server.close();
     },
+
+    startKeepalive,
+    stopKeepalive,
+    get keepaliveRunning() {
+      return keepaliveTimer !== null;
+    },
+    /** Every KEEPALIVE this Service sent, with its timestamp and connection count. */
+    keepaliveSends,
+    keepaliveIntervalMs: KEEPALIVE_INTERVAL_MS,
   };
 }
 
@@ -211,13 +267,23 @@ async function runCli(argv) {
   print(`  endpoint  ${service.url}`);
   print('  把上面的地址填进扩展设置页的 Service URL，Bridge 连上后即可发消息。');
 
+  // The real Service keeps the WebSocket receiving; without this a manual session
+  // goes quiet after ~30s, Chrome reclaims the worker and later commands have no
+  // Bridge to reach. Started here for a standalone run only — the POC drives the
+  // loop itself, because it has to switch it on and off per scenario.
+  service.startKeepalive();
+  print(`  已启动保活：每 ${Math.round(service.keepaliveIntervalMs / 1000)}s 发送一次 KEEPALIVE。`);
+
+  /** Cleanup shared by both modes, so neither leaves a timer or a socket behind. */
+  const shutdown = async () => {
+    await service.stop();
+    process.exit(0);
+  };
+
   if (!interactive) {
     print('');
     print('未开启交互模式：只打印往来帧。加 --interactive 可手工发 EXECUTE。');
-    process.on('SIGINT', async () => {
-      await service.stop();
-      process.exit(0);
-    });
+    process.on('SIGINT', shutdown);
     return;
   }
 
@@ -269,8 +335,7 @@ async function runCli(argv) {
 
   reader.on('close', async () => {
     print('');
-    await service.stop();
-    process.exit(0);
+    await shutdown();
   });
 }
 
