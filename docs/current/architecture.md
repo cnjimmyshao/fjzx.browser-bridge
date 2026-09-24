@@ -381,6 +381,8 @@ Bridge 不因这两种能力理解任何网站、媒体或业务语义：它只�
 
 失败时 `ok:false` + `error:{code,message}`，code 只有：`NOT_READY`、`INVALID_TARGET_URL`、`INVALID_SCOPE`、`INVALID_PARTITION`、`TARGET_OUT_OF_SCOPE`、`CONTEXT_FAILED`。这套码与 V1 的 `ERROR_CODES` 分开：Job 的 RESULT 不因本节新增任何错误码。
 
+**判定顺序：形状先于状态。** 请求本身的问题（`targetUrl`、`scope`、分区字段）是调用方的、永久的；"没有 Work Tab"或"缺少上下文能力"是 Bridge 的、临时的。因此畸形请求一律得到对应的 `INVALID_*`，即使 Bridge 当时 `NOT_READY`，也不会被回答成"稍后重试"；`TARGET_OUT_OF_SCOPE`、`CONTEXT_FAILED` 与分区中"是否等于 Work Tab 自身 origin"这类需要浏览器状态的判断，仍在状态检查之后。
+
 **与 Job 模型的关系**：上下文请求**不占 Job 槽**、在 `RUNNING` 期间照常服务、也不与 `USER_SCRIPTS_UNAVAILABLE` 联动——读 Cookie 与页面事实从不执行 Service JavaScript。它既不改 `currentJob`，也不改 `IDLE/RUNNING/NOT_READY` 的推导。
 
 **与 Page Context 的关系**：两者共用同一次"Work Tab 页面事实"读取实现，因此不会对同一个页面给出互相矛盾的说法；但语义不同：Request Context 的 `workTabUrl` / `referer` 是**请求语义**下的 Work Tab URL（去掉 fragment，因为 fragment 不会被发送），Page Context 的 `workTabUrl` 是页面自己报告的原样 URL。

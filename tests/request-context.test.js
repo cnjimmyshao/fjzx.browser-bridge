@@ -962,6 +962,40 @@ test('reports NOT_READY and CONTEXT_FAILED instead of throwing', async () => {
   assert.equal(unavailable.code, CONTEXT_ERROR_CODES.NOT_READY);
 });
 
+test('a malformed request is answered by shape, even when Bridge cannot serve it', async () => {
+  // Readiness is transient and the request's shape is not: an unavailable provider
+  // must not turn a permanently invalid request into "try again later".
+  const noApis = createRequestContextSource({});
+  const shapeCases = [
+    [{ targetUrl: 'not a URL' }, CONTEXT_ERROR_CODES.INVALID_TARGET_URL],
+    [{ targetUrl: 'file:///etc/passwd' }, CONTEXT_ERROR_CODES.INVALID_TARGET_URL],
+    [{ targetUrl: `${WORK_TAB_ORIGIN}/media/1`, scope: null }, CONTEXT_ERROR_CODES.INVALID_SCOPE],
+    [{ targetUrl: `${WORK_TAB_ORIGIN}/media/1`, scope: 'ANY' }, CONTEXT_ERROR_CODES.INVALID_SCOPE],
+    [
+      { targetUrl: `${WORK_TAB_ORIGIN}/media/1`, hasCrossSiteAncestor: 'yes' },
+      CONTEXT_ERROR_CODES.INVALID_PARTITION,
+    ],
+    [
+      { targetUrl: `${WORK_TAB_ORIGIN}/media/1`, topLevelSite: 'nope' },
+      CONTEXT_ERROR_CODES.INVALID_PARTITION,
+    ],
+  ];
+
+  for (const [request, code] of shapeCases) {
+    const outcome = await noApis.read({ tabId: 1, ...request });
+    assert.equal(outcome.ok, false, JSON.stringify(request));
+    assert.equal(outcome.code, code, JSON.stringify(request));
+  }
+});
+
+test('a well-formed request is still answered by state when Bridge cannot read cookies', async () => {
+  const unavailable = await createRequestContextSource({}).read({
+    tabId: 1,
+    targetUrl: `${WORK_TAB_ORIGIN}/media/1`,
+  });
+  assert.equal(unavailable.code, CONTEXT_ERROR_CODES.NOT_READY);
+});
+
 // ---------------------------------------------------------------------------
 // Protocol
 // ---------------------------------------------------------------------------
@@ -1199,6 +1233,33 @@ test('reports NOT_READY when there is no Work Tab or no context provider', async
   const unavailable = createContextHarness({ requestContext: createContextProvider({ available: false }) });
   await unavailable.bridge.handleMessage(askContext('rc-6'));
   assert.equal(unavailable.connection.sent.at(-1).error.code, CONTEXT_ERROR_CODES.NOT_READY);
+});
+
+test('answers a malformed request by shape even when the readiness answer would be NOT_READY', async () => {
+  // The short path refuses *before* the provider is consulted, so shape has to be
+  // checked there too — otherwise a permanently invalid request looks retryable
+  // exactly while Bridge is temporarily unavailable.
+  const unbound = createContextHarness({
+    workTab: createFakeWorkTab({ isBound: false, tabId: null, reason: 'NO_WORK_TAB' }),
+    requestContext: createContextProvider(),
+  });
+  await unbound.bridge.handleMessage(askContext('rc-9', { targetUrl: 'not a URL' }));
+  assert.equal(unbound.connection.sent.at(-1).error.code, CONTEXT_ERROR_CODES.INVALID_TARGET_URL);
+
+  const noProvider = createContextHarness();
+  await noProvider.bridge.handleMessage(askContext('rc-10', { scope: null }));
+  assert.equal(noProvider.connection.sent.at(-1).error.code, CONTEXT_ERROR_CODES.INVALID_SCOPE);
+
+  const unavailable = createContextHarness({ requestContext: createContextProvider({ available: false }) });
+  await unavailable.bridge.handleMessage(askContext('rc-11', { hasCrossSiteAncestor: 'yes' }));
+  assert.equal(unavailable.connection.sent.at(-1).error.code, CONTEXT_ERROR_CODES.INVALID_PARTITION);
+
+  // A provider that would have answered is not consulted for a malformed request.
+  const provider = createContextProvider();
+  const ready = createContextHarness({ requestContext: provider });
+  await ready.bridge.handleMessage(askContext('rc-12', { targetUrl: 'file:///etc/passwd' }));
+  assert.equal(ready.connection.sent.at(-1).error.code, CONTEXT_ERROR_CODES.INVALID_TARGET_URL);
+  assert.deepEqual(provider.requests, []);
 });
 
 test('forwards the provider error and refuses a context JSON would rewrite', async () => {

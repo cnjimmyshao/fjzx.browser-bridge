@@ -111,6 +111,66 @@ export function normalizeScope(raw) {
 }
 
 /**
+ * The partition fields a request can get wrong on its own, with no browser state:
+ * the ancestor bit's type, and `topLevelSite` being an absolute http(s) origin.
+ *
+ * Whether the site *is* the Work Tab's own needs the Work Tab, so it stays in
+ * `resolvePartitionKey`; these two are checked here so that a malformed partition
+ * request can be refused before anything asks Bridge whether it is ready.
+ *
+ * @param {{topLevelSite?: unknown, hasCrossSiteAncestor?: unknown}} [request]
+ * @returns {{ok: true} | {ok: false, reason: string}}
+ */
+export function validatePartitionShape(request = {}) {
+  // Validated before the opt-out: a malformed request must be rejected, not
+  // reinterpreted as "no partition lookup" just because the site was omitted.
+  if (
+    request.hasCrossSiteAncestor !== undefined &&
+    typeof request.hasCrossSiteAncestor !== 'boolean'
+  ) {
+    return { ok: false, reason: 'hasCrossSiteAncestor 必须是 boolean 或省略。' };
+  }
+
+  if (request.topLevelSite !== undefined && request.topLevelSite !== null) {
+    const supplied = normalizeTopLevelSite(request.topLevelSite);
+    if (!supplied.ok) return { ok: false, reason: supplied.reason };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Validate everything about a context request that does not depend on the browser.
+ *
+ * **Shape errors come before readiness errors.** A malformed request is the
+ * caller's and permanent; "no Work Tab" or "permissions missing" is Bridge's and
+ * transient. Answering the first with the second would tell a conforming Service to
+ * retry something that can never succeed, so both the browser-side reader and the
+ * state machine's short path ask this question before any state check.
+ *
+ * @param {{targetUrl?: unknown, scope?: unknown, topLevelSite?: unknown, hasCrossSiteAncestor?: unknown}} [request]
+ * @returns {{ok: true, targetUrl: string, scope: string} | {ok: false, code: string, message: string}}
+ */
+export function validateContextRequestShape(request = {}) {
+  const target = normalizeTargetUrl(request.targetUrl);
+  if (!target.ok) {
+    return { ok: false, code: CONTEXT_ERROR_CODES.INVALID_TARGET_URL, message: target.reason };
+  }
+
+  const scope = normalizeScope(request.scope);
+  if (!scope.ok) {
+    return { ok: false, code: CONTEXT_ERROR_CODES.INVALID_SCOPE, message: scope.reason };
+  }
+
+  const partition = validatePartitionShape(request);
+  if (!partition.ok) {
+    return { ok: false, code: CONTEXT_ERROR_CODES.INVALID_PARTITION, message: partition.reason };
+  }
+
+  return { ok: true, targetUrl: target.url, scope: scope.scope };
+}
+
+/**
  * @param {string} a absolute URL
  * @param {string} b absolute URL
  */
@@ -269,11 +329,8 @@ export function originMatchPattern(url) {
  * @returns {{ok: true, partitionKey: object | null} | {ok: false, reason: string}}
  */
 export function resolvePartitionKey(input) {
-  // Validated before the opt-out: a malformed request must be rejected, not
-  // reinterpreted as "no partition lookup" just because the site was omitted.
-  if (input.hasCrossSiteAncestor !== undefined && typeof input.hasCrossSiteAncestor !== 'boolean') {
-    return { ok: false, reason: 'hasCrossSiteAncestor 必须是 boolean 或省略。' };
-  }
+  const shape = validatePartitionShape(input);
+  if (!shape.ok) return { ok: false, reason: shape.reason };
 
   if (input.topLevelSite === null) return { ok: true, partitionKey: null };
 
@@ -286,7 +343,6 @@ export function resolvePartitionKey(input) {
   // approximated.
   if (input.topLevelSite !== undefined) {
     const supplied = normalizeTopLevelSite(input.topLevelSite);
-    if (!supplied.ok) return { ok: false, reason: supplied.reason };
     const workTabOrigin = new URL(input.workTabUrl).origin;
     if (supplied.topLevelSite !== workTabOrigin) {
       return {

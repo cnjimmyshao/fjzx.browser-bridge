@@ -10,7 +10,7 @@ import {
   isJsonCompatible,
   parseServiceMessage,
 } from './protocol.js';
-import { CONTEXT_ERROR_CODES } from './request-context.js';
+import { CONTEXT_ERROR_CODES, validateContextRequestShape } from './request-context.js';
 
 /**
  * Bridge's current technical state, and the single Job it may be running.
@@ -273,6 +273,21 @@ export function createBridgeState({
     const reply = (outgoing) => {
       sendToOrigin(deliveredOn, outgoing.requestId, outgoing);
     };
+
+    // Shape before state, exactly as the browser-side reader does it: a malformed
+    // request is the caller's and permanent, while "no Work Tab" is Bridge's and
+    // transient. Answering the first with the second would tell a conforming Service
+    // to retry something that can never succeed.
+    const shape = validateContextRequestShape({
+      targetUrl: message.targetUrl,
+      scope: message.scope,
+      topLevelSite: message.topLevelSite,
+      hasCrossSiteAncestor: message.hasCrossSiteAncestor,
+    });
+    if (!shape.ok) {
+      reply(createRequestContextError(message.requestId, shape.code, shape.message));
+      return;
+    }
 
     const reason = contextNotReadyReason();
     if (reason !== null) {

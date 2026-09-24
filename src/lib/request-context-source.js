@@ -11,10 +11,10 @@ import {
   findAmbiguousCookieNames,
   isSameOrigin,
   mergeCookieSets,
-  normalizeScope,
   normalizeTargetUrl,
   originMatchPattern,
   resolvePartitionKey,
+  validateContextRequestShape,
 } from './request-context.js';
 
 /**
@@ -184,19 +184,21 @@ export function createRequestContextSource(options = {}) {
   /**
    * Take one consistent sample of the Work Tab.
    *
+   * `targetUrl` and `scope` are already normalized and validated by the caller.
+   *
    * Returns `{retry: true}` when the page moved under us: the URL read before the
    * cookie queries and the page facts read after them must describe the same page,
    * or the answer would mix one origin's cookies and Referer with another origin's
    * user agent and referrer.
    */
-  async function sample(request, target, scope) {
+  async function sample(request, targetUrl, scopeName) {
     const workTab = await readWorkTabUrl(request.tabId);
     if (!workTab.ok) return fail(CONTEXT_ERROR_CODES.NOT_READY, workTab.reason);
 
-    if (scope.scope === TARGET_SCOPES.WORK_TAB_ORIGIN && !isSameOrigin(target.url, workTab.url)) {
+    if (scopeName === TARGET_SCOPES.WORK_TAB_ORIGIN && !isSameOrigin(targetUrl, workTab.url)) {
       return fail(
         CONTEXT_ERROR_CODES.TARGET_OUT_OF_SCOPE,
-        `targetUrl 与 Work Tab 不同源（${new URL(target.url).origin} ≠ ${new URL(workTab.url).origin}）；跨源必须显式使用 scope=${TARGET_SCOPES.TARGET_ONLY}。`,
+        `targetUrl 与 Work Tab 不同源（${new URL(targetUrl).origin} ≠ ${new URL(workTab.url).origin}）；跨源必须显式使用 scope=${TARGET_SCOPES.TARGET_ONLY}。`,
       );
     }
 
@@ -204,7 +206,7 @@ export function createRequestContextSource(options = {}) {
     // partition has to be named — and named exactly, see `resolvePartitionKey`.
     const ancestorBit = ancestorBitSupport() === true;
     const partition = resolvePartitionKey({
-      targetUrl: target.url,
+      targetUrl,
       workTabUrl: workTab.url,
       topLevelSite: request.topLevelSite,
       hasCrossSiteAncestor: request.hasCrossSiteAncestor,
@@ -216,11 +218,11 @@ export function createRequestContextSource(options = {}) {
     // nothing about the target. A target nothing is visible for is refused; a target
     // covered only by a narrower grant is answered and *marked*, because only a public
     // suffix list could tell whether a parent-domain cookie was filtered out.
-    const access = await readHostAccess(target.url);
+    const access = await readHostAccess(targetUrl);
     if (!access.ok) {
       return fail(
         CONTEXT_ERROR_CODES.CONTEXT_FAILED,
-        `扩展对目标站点没有访问权限（${new URL(target.url).origin}），无法保证 cookie 集合完整${access.kind === undefined ? '。' : `（${access.kind}）`}`,
+        `扩展对目标站点没有访问权限（${new URL(targetUrl).origin}），无法保证 cookie 集合完整${access.kind === undefined ? '。' : `（${access.kind}）`}`,
       );
     }
 
@@ -240,14 +242,14 @@ export function createRequestContextSource(options = {}) {
     let unpartitioned;
     let partitioned = [];
     try {
-      unpartitioned = await cookies.getAll({ url: target.url, ...storeFilter });
+      unpartitioned = await cookies.getAll({ url: targetUrl, ...storeFilter });
       if (partition.partitionKey !== null) {
-        partitioned = await cookies.getAll({ url: target.url, ...storeFilter, partitionKey: partition.partitionKey });
+        partitioned = await cookies.getAll({ url: targetUrl, ...storeFilter, partitionKey: partition.partitionKey });
       }
     } catch (error) {
       return fail(
         CONTEXT_ERROR_CODES.CONTEXT_FAILED,
-        `chrome.cookies 读取失败（${describeErrorKind(error)}，目标 ${new URL(target.url).origin}）`,
+        `chrome.cookies 读取失败（${describeErrorKind(error)}，目标 ${new URL(targetUrl).origin}）`,
       );
     }
     const all = mergeCookieSets(unpartitioned, partitioned);
@@ -256,7 +258,7 @@ export function createRequestContextSource(options = {}) {
     // must not then claim a coverage it no longer has — `getAll` would have filtered
     // silently, so a stale `'all'` would be a completeness claim about a set that was
     // already trimmed. Re-checking costs one call and turns that into a refusal.
-    const accessAfter = await readHostAccess(target.url);
+    const accessAfter = await readHostAccess(targetUrl);
     if (!accessAfter.ok || accessAfter.coverage !== access.coverage) {
       return fail(
         CONTEXT_ERROR_CODES.CONTEXT_FAILED,
@@ -282,8 +284,8 @@ export function createRequestContextSource(options = {}) {
     if (!after.ok || after.url !== workTab.url) return { retry: true };
 
     const context = buildRequestContext({
-      targetUrl: target.url,
-      scope: scope.scope,
+      targetUrl,
+      scope: scopeName,
       workTabUrl: workTab.url,
       cookies: all,
       // Only a tie *between* the two queries is unreproducible; within one response
@@ -313,6 +315,11 @@ export function createRequestContextSource(options = {}) {
    * @returns {Promise<{ok: true, context: object} | {ok: false, code: string, message: string}>}
    */
   async function read(request) {
+    // Shape before state: whatever is wrong with the request itself is answered the
+    // same way whether or not Bridge could have served it.
+    const shape = validateContextRequestShape(request);
+    if (!shape.ok) return fail(shape.code, shape.message);
+
     if (!isAvailable()) {
       return fail(
         CONTEXT_ERROR_CODES.NOT_READY,
@@ -320,17 +327,11 @@ export function createRequestContextSource(options = {}) {
       );
     }
 
-    const target = normalizeTargetUrl(request?.targetUrl);
-    if (!target.ok) return fail(CONTEXT_ERROR_CODES.INVALID_TARGET_URL, target.reason);
-
-    const scope = normalizeScope(request?.scope);
-    if (!scope.ok) return fail(CONTEXT_ERROR_CODES.INVALID_SCOPE, scope.reason);
-
     // Two attempts: one to notice a navigation that happened mid-sample, one to
     // answer from the page the tab settled on. A tab that keeps moving is reported
     // rather than answered with a mixture.
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const outcome = await sample(request, target, scope);
+      const outcome = await sample(request, shape.targetUrl, shape.scope);
       if (outcome.retry !== true) return outcome;
     }
     return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, 'Work Tab 在采样期间发生了导航，无法给出同一页面的上下文。');
