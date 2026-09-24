@@ -270,16 +270,21 @@ export function createRequestContextSource(options = {}) {
     if (!facts.ok) return fail(CONTEXT_ERROR_CODES.CONTEXT_FAILED, `无法读取 Work Tab 页面：${facts.reason}`);
     const pageFacts = facts.facts;
 
-    // The *document* the facts came from must be the document the cookies were read
-    // for. URLs alone are not enough: a reload keeps the URL and swaps the document,
-    // and comparing only origins would even accept a same-origin navigation
-    // (`/feed` → `/account`). Either way the answer would mix one document's cookies
-    // and Referer with another's page facts, so the read starts over — once.
+    // Four reads take part in one sample: the tab URL before the cookie queries, the
+    // page's own location at that moment, the page's location after the queries, and
+    // the tab URL again at the end. All four must describe the same page, or the answer
+    // mixes one document's cookies and Referer with another's page facts.
+    //
+    // `documentId` is the exact identity when the browser reports it; the URLs are the
+    // fallback for browsers that do not, and they also catch a URL change that keeps the
+    // document (`pushState`). Either way the read starts over — once.
+    const beforePage = normalizeTargetUrl(factsBefore.facts.pageUrl);
+    if (beforePage.ok && beforePage.url !== workTab.url) return { retry: true };
     if (factsBefore.facts.documentId !== null && pageFacts.documentId !== null) {
       if (factsBefore.facts.documentId !== pageFacts.documentId) return { retry: true };
     }
-    const factsPage = normalizeTargetUrl(pageFacts.pageUrl);
-    if (factsPage.ok && factsPage.url !== workTab.url) return { retry: true };
+    const afterPage = normalizeTargetUrl(pageFacts.pageUrl);
+    if (afterPage.ok && afterPage.url !== workTab.url) return { retry: true };
     const after = await readWorkTabUrl(request.tabId);
     if (!after.ok || after.url !== workTab.url) return { retry: true };
 

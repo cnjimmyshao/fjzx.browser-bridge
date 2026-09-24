@@ -910,6 +910,27 @@ test('a reload that keeps the URL is detected by document identity', async () =>
   assert.equal(fallback.ok, true);
   // One identifying read plus one after the cookies.
   assert.equal(noDocumentId.calls.executeScript.length, 2);
+
+  // Without a document id, the URL guard has to cover the *first* read as well: a
+  // navigation can publish its destination through `tabs.get()` while the injection
+  // still reads the old document, and both later checks would then agree with the
+  // destination while the cookies were sampled across the transition. The first
+  // attempt must therefore be thrown away and the sample retaken.
+  const racedTab = createStubChrome({
+    cookies: [{ name: 'sid', value: 's', path: '/' }],
+    // The tab already reports the destination; the page still answers from the old
+    // document on the first read, and from the new one afterwards.
+    tabUrl: 'https://app.test/account',
+    pageFacts: [
+      { userAgent: 'PageUA/1.0', documentReferrer: '', referrerPolicy: null, pageUrl: WORK_TAB_URL },
+      { userAgent: 'PageUA/1.0', documentReferrer: '', referrerPolicy: null, pageUrl: 'https://app.test/account' },
+    ],
+  });
+  const raced = await createSource(racedTab).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  assert.equal(raced.ok, true, '重试后页面已稳定');
+  assert.equal(raced.context.workTabUrl, 'https://app.test/account');
+  // Two reads per attempt: the mixed first attempt must not be the one that answers.
+  assert.equal(racedTab.calls.executeScript.length, 4, '第一次采样必须被丢弃并重来');
 });
 
 test('originMatchPattern drops the port, which match patterns do not support', () => {

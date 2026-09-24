@@ -1,5 +1,5 @@
 {
-  "at": "2026-09-24T08:57:07.945Z",
+  "at": "2026-09-24T09:08:24.846Z",
   "issue": 25,
   "extension": "src",
   "environment": {
@@ -8,8 +8,8 @@
     "browser": "Chrome/153.0.8010.52",
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
   },
-  "service": "ws://127.0.0.1:28242",
-  "origin": "http://127.0.0.1:28241",
+  "service": "ws://127.0.0.1:37651",
+  "origin": "http://127.0.0.1:37650",
   "summary": {
     "total": 16,
     "passed": 16,
@@ -103,7 +103,7 @@
           "sec-fetch-site": "same-origin",
           "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
         },
-        "referer": "http://127.0.0.1:28241/feed",
+        "referer": "http://127.0.0.1:37650/feed",
         "cookieNames": [
           "sid",
           "theme",
@@ -151,7 +151,7 @@
           }
         ],
         "userAgentSource": "work-tab-page",
-        "observedAt": "2026-09-24T08:57:05.890Z"
+        "observedAt": "2026-09-24T09:08:22.796Z"
       }
     },
     {
@@ -159,7 +159,7 @@
       "detail": {
         "status": 200,
         "bytes": 65536,
-        "digest": "3e89dccda79796e84122725acd08c6d67b401782a57395c115d5cc2444b8fc64"
+        "digest": "0a5ac7823509094c693dbbbb005fd3cf00f1b6c69b658ebedf8c8995a549db6d"
       }
     },
     {
@@ -210,10 +210,10 @@
     {
       "name": "EXECUTE → 资源 URL → 请求上下文 → Node 重放",
       "detail": {
-        "discovered": "http://127.0.0.1:28241/media/1",
-        "workTabUrl": "http://127.0.0.1:28241/feed",
+        "discovered": "http://127.0.0.1:37650/media/1",
+        "workTabUrl": "http://127.0.0.1:37650/feed",
         "status": 200,
-        "digest": "3e89dccda79796e84122725acd08c6d67b401782a57395c115d5cc2444b8fc64"
+        "digest": "0a5ac7823509094c693dbbbb005fd3cf00f1b6c69b658ebedf8c8995a549db6d"
       }
     }
   ]
