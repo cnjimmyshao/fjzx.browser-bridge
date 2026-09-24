@@ -1,12 +1,12 @@
 {
-  "startedAt": "2026-09-23T16:41:52.104Z",
+  "startedAt": "2026-09-24T00:56:15.310Z",
   "environment": {
     "platform": "win32 10.0.26200 x64",
     "node": "v26.7.0",
     "keepaliveIntervalMs": 20000
   },
   "options": {
-    "port": 9495,
+    "port": 9505,
     "headed": false,
     "keepaliveSeconds": 600,
     "baselineSeconds": 100,
@@ -24,35 +24,35 @@
     "evidence": "docs/research/evidence/keepalive-poc.json"
   },
   "browserVersion": "Chrome/153.0.8010.52",
-  "commit": "11ebd1381cc0983c4d99f6f1a2a74784dff4af17",
-  "workingTreeDirty": "M docs/current/README.md\n M docs/current/architecture.md\n M docs/decisions/0001-service-keepalive.md\n M docs/decisions/README.md\n M docs/development.md\n M docs/research/README.md\n?? docs/research/2026-09-23-keepalive-verification.md\n?? docs/research/evidence/",
+  "commit": "d734d9f63e6edb347fee5f785b204db010ec5547",
+  "workingTreeDirty": "M docs/development.md\n M docs/research/evidence/keepalive-poc.json\n M tests/poc/keepalive-poc.mjs",
   "phases": [
     {
       "phase": "A",
-      "startedAt": 3420,
+      "startedAt": 3390,
       "ok": true,
       "assertions": [
         {
           "description": "A 基线：无 WebSocket 活动时 Worker 被回收",
           "ok": true,
-          "reclaimAfterMs": 30875,
+          "reclaimAfterMs": 30891,
           "openConnectionsAtStart": 1
         },
         {
           "description": "A 基线：socket 随 Worker 一起断开，且未重连",
           "ok": true,
-          "socketDroppedAfterMs": 30875
+          "socketDroppedAfterMs": 30891
         }
       ],
-      "durationMs": 30876
+      "durationMs": 30892
     },
     {
       "phase": "B",
-      "startedAt": 34296,
+      "startedAt": 34282,
       "ok": true,
       "assertions": [
         {
-          "description": "B 保活窗口内 worker 从未被回收（600.2s）",
+          "description": "B 保活窗口内 Worker 从未被回收（600.7s）",
           "ok": true,
           "reconnects": 2
         },
@@ -61,16 +61,29 @@
           "ok": true
         },
         {
-          "description": "B 窗口 >= 10 分钟且 KEEPALIVE 按 20s 投递（31 次）",
+          "description": "B 窗口内投递间隔保持 20s（实测 20–20s）",
           "ok": true,
-          "expectedAtLeast": 30
+          "minGapMs": 20000,
+          "maxGapMs": 20016,
+          "toleranceMs": 10000
+        },
+        {
+          "description": "B 窗口 >= 10 分钟且投递次数覆盖整个窗口（31 次 >= 30）",
+          "ok": true,
+          "expectedAtLeast": 30,
+          "windowMs": 600743
+        },
+        {
+          "description": "B 整个保活窗口内 Bridge 一帧都没有回（31 次投递 → 0 条回帧）",
+          "ok": true,
+          "replies": []
         }
       ],
-      "durationMs": 601688
+      "durationMs": 602174
     },
     {
       "phase": "C2",
-      "startedAt": 635984,
+      "startedAt": 636456,
       "ok": true,
       "assertions": [
         {
@@ -88,31 +101,27 @@
           "data": {
             "ok": 1
           }
-        },
-        {
-          "description": "C2 Bridge 从未对 KEEPALIVE 作出应答",
-          "ok": true
         }
       ],
-      "durationMs": 46
+      "durationMs": 60
     },
     {
       "phase": "D",
-      "startedAt": 636031,
+      "startedAt": 636516,
       "ok": true,
       "assertions": [
         {
           "description": "D 停止保活后 worker 恢复 idle 回收",
           "ok": true,
-          "reclaimAfterStopMs": 30897,
-          "reclaimAfterLastKeepaliveMs": 30946
+          "reclaimAfterStopMs": 30961,
+          "reclaimAfterLastKeepaliveMs": 31559
         }
       ],
-      "durationMs": 30897
+      "durationMs": 30963
     },
     {
       "phase": "E",
-      "startedAt": 666928,
+      "startedAt": 667479,
       "ok": true,
       "assertions": [
         {
@@ -125,7 +134,13 @@
           "description": "E 跨多个 keepalive 周期后 currentJob 未被改写",
           "ok": true,
           "state": "RUNNING",
-          "jobId": "running-keepalive-2"
+          "jobId": "running-keepalive-2",
+          "keepaliveSentDuringJob": 3
+        },
+        {
+          "description": "E 该 Job 期间确实投递了两次周期性 KEEPALIVE",
+          "ok": true,
+          "keepaliveSentDuringJob": 3
         },
         {
           "description": "E 原 Job 正常 RESULT",
@@ -141,11 +156,11 @@
           "ok": true
         }
       ],
-      "durationMs": 26449
+      "durationMs": 46200
     },
     {
       "phase": "F",
-      "startedAt": 693377,
+      "startedAt": 713679,
       "ok": true,
       "assertions": [
         {
@@ -178,11 +193,11 @@
           "reason": "MULTIPLE_TABS"
         }
       ],
-      "durationMs": 43642
+      "durationMs": 43634
     },
     {
       "phase": "G",
-      "startedAt": 737019,
+      "startedAt": 757313,
       "ok": true,
       "assertions": [
         {
@@ -201,7 +216,7 @@
         {
           "description": "G Service 恢复后 Bridge 重连",
           "ok": true,
-          "recoveredMs": 11064
+          "recoveredMs": 11134
         },
         {
           "description": "G 重连后 KEEPALIVE 恢复投递",
@@ -215,144 +230,151 @@
           "keepaliveSends": 1
         }
       ],
-      "durationMs": 23076
+      "durationMs": 23145
     }
   ],
   "timings": {
-    "baselineReclaimMs": 30875,
-    "baselineSocketDropMs": 30875,
-    "keepaliveWindowMs": 600244,
+    "baselineReclaimMs": 30891,
+    "baselineSocketDropMs": 30891,
+    "repliesDuringKeepaliveWindow": 0,
+    "keepaliveWindowMs": 600743,
     "keepaliveSent": 31,
     "keepaliveExpectedAtLeast": 30,
-    "reclaimAfterStopMs": 30897,
-    "reclaimAfterLastKeepaliveMs": 30946,
+    "keepaliveMaxGapMs": 20016,
+    "keepaliveMinGapMs": 20000,
+    "reclaimAfterStopMs": 30961,
+    "reclaimAfterLastKeepaliveMs": 31559,
     "workerReclaimedDuringOutage": false,
-    "reconnectAfterOutageMs": 11064
+    "reconnectAfterOutageMs": 11134
   },
   "events": [
     {
-      "at": 1790181713723,
-      "t": 1619,
+      "at": 1790211376895,
+      "t": 1585,
       "phase": "setup",
       "event": "bridge-connected",
       "openConnections": 1
     },
     {
-      "at": 1790181715524,
-      "t": 3420,
+      "at": 1790211378699,
+      "t": 3389,
       "phase": "setup",
       "event": "ready",
       "state": "IDLE"
     },
     {
-      "at": 1790181746399,
-      "t": 34295,
+      "at": 1790211409591,
+      "t": 34281,
       "phase": "A",
       "event": "baseline-window",
-      "durationMs": 30875,
+      "durationMs": 30891,
       "reclaims": 1,
       "socketDrops": 1,
-      "socketDroppedAfterMs": 30875,
+      "socketDroppedAfterMs": 30891,
       "workerTargetsSeen": [
         1,
         0
       ]
     },
     {
-      "at": 1790181746400,
-      "t": 34296,
+      "at": 1790211409592,
+      "t": 34282,
       "phase": "B",
       "event": "wake-begin",
       "method": "settings-save",
       "via": "ws://127.0.0.1:1"
     },
     {
-      "at": 1790181747843,
-      "t": 35739,
+      "at": 1790211411021,
+      "t": 35711,
       "phase": "B",
       "event": "wake-done",
-      "reconnectMs": 253
+      "reconnectMs": 251
     },
     {
-      "at": 1790181747843,
-      "t": 35739,
+      "at": 1790211411022,
+      "t": 35712,
       "phase": "B",
       "event": "keepalive-started",
       "intervalMs": 20000
     },
     {
-      "at": 1790182348087,
-      "t": 635983,
+      "at": 1790212011765,
+      "t": 636455,
       "phase": "B",
       "event": "keepalive-window",
-      "durationMs": 600244,
+      "durationMs": 600743,
       "sent": 31,
+      "minGapMs": 20000,
+      "maxGapMs": 20016,
       "reconnects": 2,
-      "reclaims": 0
+      "reclaims": 0,
+      "repliesFromBridge": 0
     },
     {
-      "at": 1790182348135,
-      "t": 636031,
+      "at": 1790212011827,
+      "t": 636517,
       "phase": "D",
       "event": "keepalive-stopped",
-      "lastSendAgoMs": 49
+      "lastSendAgoMs": 598
     },
     {
-      "at": 1790182379032,
-      "t": 666928,
+      "at": 1790212042788,
+      "t": 667478,
       "phase": "D",
       "event": "stop-window",
-      "durationMs": 30897,
+      "durationMs": 30961,
       "reclaims": 1,
-      "reclaimAfterMs": 30897
+      "reclaimAfterMs": 30961
     },
     {
-      "at": 1790182379033,
-      "t": 666929,
+      "at": 1790212042789,
+      "t": 667479,
       "phase": "E",
       "event": "wake-begin",
       "method": "settings-save",
       "via": "ws://127.0.0.1:1"
     },
     {
-      "at": 1790182380443,
-      "t": 668339,
+      "at": 1790212043951,
+      "t": 668641,
       "phase": "E",
       "event": "wake-done",
-      "reconnectMs": 254
+      "reconnectMs": 0
     },
     {
-      "at": 1790182380444,
-      "t": 668340,
+      "at": 1790212043951,
+      "t": 668641,
       "phase": "E",
-      "event": "keepalive-restarted"
+      "event": "keepalive-restarted",
+      "intervalMs": 20000
     },
     {
-      "at": 1790182449124,
-      "t": 737020,
+      "at": 1790212132623,
+      "t": 757313,
       "phase": "G",
       "event": "service-stopping",
-      "keepaliveSends": 35
+      "keepaliveSends": 36
     },
     {
-      "at": 1790182449125,
-      "t": 737021,
+      "at": 1790212132624,
+      "t": 757314,
       "phase": "G",
       "event": "service-down"
     },
     {
-      "at": 1790182461134,
-      "t": 749030,
+      "at": 1790212144634,
+      "t": 769324,
       "phase": "G",
       "event": "service-restarted",
       "workerReclaimed": false
     },
     {
-      "at": 1790182472199,
-      "t": 760095,
+      "at": 1790212155768,
+      "t": 780458,
       "phase": "G",
       "event": "reconnect-outcome",
-      "recoveredMs": 11064,
+      "recoveredMs": 11134,
       "workerReclaimed": false
     }
   ],
@@ -361,18 +383,18 @@
       "phase": "A",
       "description": "A 基线：无 WebSocket 活动时 Worker 被回收",
       "ok": true,
-      "reclaimAfterMs": 30875,
+      "reclaimAfterMs": 30891,
       "openConnectionsAtStart": 1
     },
     {
       "phase": "A",
       "description": "A 基线：socket 随 Worker 一起断开，且未重连",
       "ok": true,
-      "socketDroppedAfterMs": 30875
+      "socketDroppedAfterMs": 30891
     },
     {
       "phase": "B",
-      "description": "B 保活窗口内 worker 从未被回收（600.2s）",
+      "description": "B 保活窗口内 Worker 从未被回收（600.7s）",
       "ok": true,
       "reconnects": 2
     },
@@ -383,9 +405,24 @@
     },
     {
       "phase": "B",
-      "description": "B 窗口 >= 10 分钟且 KEEPALIVE 按 20s 投递（31 次）",
+      "description": "B 窗口内投递间隔保持 20s（实测 20–20s）",
       "ok": true,
-      "expectedAtLeast": 30
+      "minGapMs": 20000,
+      "maxGapMs": 20016,
+      "toleranceMs": 10000
+    },
+    {
+      "phase": "B",
+      "description": "B 窗口 >= 10 分钟且投递次数覆盖整个窗口（31 次 >= 30）",
+      "ok": true,
+      "expectedAtLeast": 30,
+      "windowMs": 600743
+    },
+    {
+      "phase": "B",
+      "description": "B 整个保活窗口内 Bridge 一帧都没有回（31 次投递 → 0 条回帧）",
+      "ok": true,
+      "replies": []
     },
     {
       "phase": "C2",
@@ -407,16 +444,11 @@
       }
     },
     {
-      "phase": "C2",
-      "description": "C2 Bridge 从未对 KEEPALIVE 作出应答",
-      "ok": true
-    },
-    {
       "phase": "D",
       "description": "D 停止保活后 worker 恢复 idle 回收",
       "ok": true,
-      "reclaimAfterStopMs": 30897,
-      "reclaimAfterLastKeepaliveMs": 30946
+      "reclaimAfterStopMs": 30961,
+      "reclaimAfterLastKeepaliveMs": 31559
     },
     {
       "phase": "E",
@@ -430,7 +462,14 @@
       "description": "E 跨多个 keepalive 周期后 currentJob 未被改写",
       "ok": true,
       "state": "RUNNING",
-      "jobId": "running-keepalive-2"
+      "jobId": "running-keepalive-2",
+      "keepaliveSentDuringJob": 3
+    },
+    {
+      "phase": "E",
+      "description": "E 该 Job 期间确实投递了两次周期性 KEEPALIVE",
+      "ok": true,
+      "keepaliveSentDuringJob": 3
     },
     {
       "phase": "E",
@@ -503,7 +542,7 @@
       "phase": "G",
       "description": "G Service 恢复后 Bridge 重连",
       "ok": true,
-      "recoveredMs": 11064
+      "recoveredMs": 11134
     },
     {
       "phase": "G",
@@ -529,10 +568,10 @@
   "summary": {
     "phasesRun": 7,
     "phasesFailed": 0,
-    "durationMs": 760095,
-    "assertionsRun": 27,
-    "assertionsRecorded": 27
+    "durationMs": 780458,
+    "assertionsRun": 29,
+    "assertionsRecorded": 29
   },
-  "finishedAt": "2026-09-23T16:54:32.199Z",
+  "finishedAt": "2026-09-24T01:09:15.768Z",
   "evidencePath": "docs/research/evidence/keepalive-poc.json"
 }

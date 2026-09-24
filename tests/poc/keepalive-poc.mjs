@@ -500,7 +500,10 @@ try {
   if (wanted('B')) {
     await phase('B', async (entry) => {
       await wakeWorker('B');
-      const sendMark = service.mark();
+      // Two separate marks: `sendsBefore` indexes the Service's KEEPALIVE send log,
+      // `framesBefore` indexes the frames the Bridge has sent back.
+      const sendsBefore = service.keepaliveSends.length;
+      const framesBefore = service.mark();
       keepaliveStartedAt = Date.now();
       service.startKeepalive();
       record('B', 'keepalive-started', { intervalMs: KEEPALIVE_INTERVAL_MS });
@@ -513,22 +516,33 @@ try {
         timeoutMs: options.keepaliveSeconds * 1000 + 5000,
       });
 
-      const sent = service.keepaliveSends.length - sendMark;
-      const expected = Math.floor(options.keepaliveSeconds / (KEEPALIVE_INTERVAL_MS / 1000));
-      // Everything the Bridge sent back during the window. Sampled here, before the C2
-      // probes add replies of their own, this is the direct evidence for the "silent
-      // response" half of the contract: the Service sent KEEPALIVE frames and the
-      // Bridge answered none of them. Checking only for a literal `type: "KEEPALIVE"`
-      // reply would miss the far likelier wrong implementations — a STATUS or RESULT
-      // per keepalive.
-      const repliesDuringWindow = service.since(sendMark);
+      const sent = service.keepaliveSends.length - sendsBefore;
+      const windowSends = service.keepaliveSends.slice(sendsBefore);
+      // What the cadence claim actually needs: the frames that did arrive must be
+      // ~20s apart, and there must be enough of them to have carried the window.
+      // Counting only `floor(window / 20)` would demand a frame at exactly t=window,
+      // which is outside the window by definition — 29 sends over 600s *is* a 20s
+      // cadence, and the gap check is what proves it.
+      const gaps = windowSends
+        .slice(1)
+        .map((send, index) => send.at - windowSends[index].at);
+      const maxGapMs = gaps.length > 0 ? Math.max(...gaps) : null;
+      const minGapMs = gaps.length > 0 ? Math.min(...gaps) : null;
+      const expected = Math.ceil((options.keepaliveSeconds * 1000) / KEEPALIVE_INTERVAL_MS);
+      // One period plus slack for the sampling loop and timer drift.
+      const gapToleranceMs = KEEPALIVE_INTERVAL_MS / 2;
+      const repliesDuringWindow = service.since(framesBefore);
       result.timings.repliesDuringKeepaliveWindow = repliesDuringWindow.length;
       result.timings.keepaliveWindowMs = keepaliveWindow.durationMs;
       result.timings.keepaliveSent = sent;
       result.timings.keepaliveExpectedAtLeast = expected;
+      result.timings.keepaliveMaxGapMs = maxGapMs;
+      result.timings.keepaliveMinGapMs = minGapMs;
       record('B', 'keepalive-window', {
         durationMs: keepaliveWindow.durationMs,
         sent,
+        minGapMs,
+        maxGapMs,
         reconnects: service.bridgeCount() - 1,
         reclaims: reclaimsIn(keepaliveWindow),
         repliesFromBridge: repliesDuringWindow.length,
@@ -538,8 +552,15 @@ try {
         reconnects: service.bridgeCount() - 1,
       });
       check(entry, 'B 窗口内 socket 始终 OPEN', keepaliveWindow.samples.every((s) => s.socketOpen));
-      check(entry, `B 窗口 >= 10 分钟且 KEEPALIVE 按 20s 投递（${sent} 次）`, sent >= expected, {
+      check(
+        entry,
+        `B 窗口内投递间隔保持 ${KEEPALIVE_INTERVAL_MS / 1000}s（实测 ${seconds(minGapMs ?? 0)}–${seconds(maxGapMs ?? 0)}s）`,
+        maxGapMs !== null && maxGapMs <= KEEPALIVE_INTERVAL_MS + gapToleranceMs,
+        { minGapMs, maxGapMs, toleranceMs: gapToleranceMs },
+      );
+      check(entry, `B 窗口 >= 10 分钟且投递次数覆盖整个窗口（${sent} 次 >= ${expected}）`, sent >= expected, {
         expectedAtLeast: expected,
+        windowMs: keepaliveWindow.durationMs,
       });
       check(
         entry,
