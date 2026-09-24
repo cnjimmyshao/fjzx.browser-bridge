@@ -2,7 +2,7 @@
 
 Current Version: V1
 
-当前架构与协议见 [architecture.md](architecture.md)。它由原 `docs/architecture-v1.md` 原样迁入，保留原文和章节；本次文档组织不改变版本、接口、执行 world、权限、状态机、Work Tab 或 Service 职责。
+当前架构与协议见 [architecture.md](architecture.md)。它由原 `docs/architecture-v1.md` 迁入，第 1–13 节保留原文与措辞；迁移本身不改变版本、接口、执行 world、权限、状态机、Work Tab 或 Service 职责。第 14 节是 [Issue #25](https://github.com/cnjimmyshao/fjzx.browser-bridge/issues/25) 正式化的 Page Context 与 Request Context，其取舍见 [Decision 0003](../decisions/0003-page-context-vs-request-context.md)，实测依据见 [Research](../research/2026-09-24-page-request-context.md)。
 
 开发及 POC 操作见 [开发说明](../development.md)，证据与未决限制见 [Research](../research/README.md)。后者记录已有观察，不代表本次重新测试，也不自动修改本目录的 Contract。
 

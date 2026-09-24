@@ -15,3 +15,4 @@ Research 回答“某个时间和环境下实际观察到什么”，不代替 [
 | 整理日期 | 报告 | 证据状态 |
 | --- | --- | --- |
 | 2026-09-23 | [既有浏览器观察与 KEEPALIVE 来源](2026-09-23-existing-browser-evidence.md) | 已有 README / Issue 报告整理；本次未重跑，外部原始日志未取得 |
+| 2026-09-24 | [Page Context 与 Request Context：当前实现的真实浏览器验证](2026-09-24-page-request-context.md) | 本次实测（Chrome for Testing 153.0.8010.52 / Windows）；证据 `evidence/page-request-context.json` |
