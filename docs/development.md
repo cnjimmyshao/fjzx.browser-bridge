@@ -80,9 +80,9 @@ docs/                     Current、Research、Decision 和开发说明
 4. 打开扩展 Options，保存终端打印的 Service URL；专用 Profile 中只保留一个普通网页作为 Work Tab。
 5. 在终端输入脚本函数体，例如 `return document.title`；`:status` 请求当前状态，`:input <json>` 设置后续输入，`:quit` 退出。
 
-测试 Service 启动时会同时启动保活循环，因此终端每 20 秒会看到一条 `→ {"type":"KEEPALIVE"}`。这是必要的：手工会话一旦静默约 30s，Chrome 会回收 Worker 并断开 socket，之后的 `:status` 或脚本就再也到不了 Bridge。不加 `--interactive` 时只打印往来帧，同样带保活。其他测试客户端的使用方式以测试 Service 的实际接口为准；Bridge 本身仍主动连接 Service。
+测试 Service 启动时会同时启动保活循环，因此终端每 20 秒会看到一条 `→ {"type":"KEEPALIVE"}`。**这是测试 Service 在模拟真实 Service 的行为，不是 Browser Bridge 的能力**：生产环境的周期发送属于调用 Bridge 的 Service（见 [Current §3.1](current/architecture.md#31-mv3-空闲回收与-service-保活keepalive)），Bridge 生产代码里没有这个 timer。测试 Service 需要它，是因为手工会话一旦静默约 30s，Chrome 会回收 Worker 并断开 socket，之后的 `:status` 或脚本就再也到不了 Bridge。不加 `--interactive` 时只打印往来帧，同样带保活。其他测试客户端的使用方式以测试 Service 的实际接口为准；Bridge 本身仍主动连接 Service。
 
-> 保活 POC 自己按场景开关这个循环（见 `tests/poc/keepalive-poc.mjs`），所以基线场景仍然能观察到无活动时的回收。
+> 保活 POC 自己按场景开关这个循环（见 `tests/poc/keepalive-poc.mjs`），所以基线场景仍然能观察到无活动时的回收。该循环的清理有回归测试：`tests/poc-harness.test.js` 会验证 `stop()` 之后进程能自行退出。
 
 ### 运行前的一次性设置
 

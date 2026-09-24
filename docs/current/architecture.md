@@ -43,11 +43,15 @@ Bridge 是 Manifest V3 Service Worker，**空闲约 30s 会被 Chrome 回收，s
 
 已确认的机制：**Service 在既有 WebSocket 上周期性发送 `{"type":"KEEPALIVE"}`（每 20 秒）**。Chrome 116 起，收发 WebSocket **消息**会重置 Service Worker 的空闲计时；仅保持 socket 打开不算活动，因此这条消息的作用就是制造接收活动。决定来源与限制见 [ADR 0001](../decisions/0001-service-keepalive.md)。
 
-- **发送循环属于 Service**，与连接生命周期绑定：每条 Service 连接只有一个循环，断开或发送失败时清理，重连后恢复。
-- **Bridge 只识别它，然后保持沉默。** 不回 ACK/RESULT/STATUS，不占 Job 槽，不访问 Work Tab，不持久化，不改变 `IDLE/RUNNING/NOT_READY` 的推导。详见 §8.7。
-- **这不是健康检查，也不是唤醒通道。** KEEPALIVE 维持的是**尚存活连接**的消息活动；浏览器退出、系统休眠、网络中断、以及 worker 已被回收都不在保证范围内，Bridge 也不因此获得新的恢复或重放能力。
+**职责划分（明确且不得混淆）：**
+
+- **生产环境的周期发送属于 Service。** timer 的创建、停止、断开清理、重连后恢复、以及避免重复 timer，都是调用 Bridge 的 Service（如 pr-dy、pr-bilibili）自己的实现职责，与它管理浏览器进程、Profile、调度同属一类。**Bridge 的生产代码里没有这个 timer。**
+- **Bridge 的正式职责只有接收并静默处理。** 识别该消息类型，不回 ACK/RESULT/STATUS，不创建或占用 Job，不读写 Work Tab，不持久化，不改变 `IDLE/RUNNING/NOT_READY` 的推导。详见 §8.7。
+- **这不是健康检查，也不是唤醒通道。** KEEPALIVE 维持的是**尚存活连接**的消息活动；浏览器退出、系统休眠、网络中断、以及 Worker 已被回收都不在保证范围内，Bridge 也不因此获得新的恢复或重放能力。
 
 Bridge 侧不新增自发保活 timer、`alarms`、offscreen、Native Messaging、健康评分或 Job 重试。
+
+> 本仓库 `tests/poc/service.mjs` 里也有一个发送循环，它是**测试/POC Service**：用来模拟真实 Service 每 20 秒发送 KEEPALIVE，以便验证 Bridge 的浏览器生命周期行为。它不是 Browser Bridge 的产品能力，也不构成对 Bridge 的职责扩展。
 
 ## 4. Service URL
 
@@ -232,6 +236,8 @@ V1 NOT_READY reason：
 ```
 
 Service → Bridge 的单向保活帧，用于在 §3.1 所述的空闲回收窗口内维持 socket 的接收活动。它**没有其他字段**，Bridge 也不解释其中的任何内容。
+
+**由 Service 发送**（§3.1 的职责划分）：Bridge 生产代码不含发送 timer，这一帧的出现频率与发送时机不是 Bridge 的保证，Bridge 也不对它做频率校验、超时判定或健康评估。
 
 Bridge 收到它的行为就是**什么都不做**：不发送任何应答，不创建或占用 Job，不读写 Work Tab，不改变 `IDLE/RUNNING/NOT_READY`，不写历史。判定它是否达成的唯一依据就是这帧到达了浏览器，而这在收到它时已经成立。
 

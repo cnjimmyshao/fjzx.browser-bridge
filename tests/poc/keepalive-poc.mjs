@@ -455,27 +455,86 @@ try {
   assert.equal(idleStatus.state, 'IDLE', 'POC 前提：唯一 Work Tab 且未执行 Job');
   record('setup', 'ready', { state: idleStatus.state });
 
+  // ── setup: can the test Service actually drive a send loop? ─────────────────
+  //
+  // A smoke check on a throwaway Service, before any measurement. Its job is to make
+  // sure the later scenarios are not "passing" with a loop that never sent anything —
+  // B would then prove nothing about a cadence, and E nothing about frames inside a
+  // Job. Short interval on purpose: this asks whether the loop runs and stops, not
+  // whether its period is 20s (B measures that).
+  //
+  // It is *not* the leak check. `stop()` has already closed the listening socket by
+  // the time the count is re-read, so a surviving `setInterval` would have nothing to
+  // send on; and `process._getActiveHandles()` does not expose a live interval on
+  // current Node, so filtering it proves nothing either way. The bounded proof that no
+  // timer survives `stop()` is the Node test in `tests/poc-harness.test.js`, which
+  // requires the process to exit on its own.
+  if (wanted('B') || wanted('E')) {
+    const probe = await startTestService();
+    try {
+      const probeSocket = new WebSocket(probe.url);
+      await new Promise((resolve, reject) => {
+        probeSocket.addEventListener('open', resolve, { once: true });
+        probeSocket.addEventListener('error', reject, { once: true });
+      });
+      probe.startKeepalive(200);
+      // Plain polling rather than `until()`: that helper's 250ms floor is the same
+      // order as this interval.
+      const sendDeadline = Date.now() + 3000;
+      while (probe.keepaliveSends.length < 3 && Date.now() < sendDeadline) {
+        await sleep(50);
+      }
+      const sendsBeforeStop = probe.keepaliveSends.length;
+      probeSocket.close();
+      await probe.stop();
+      record('setup', 'send-loop-probe', {
+        sendsBeforeStop,
+        keepaliveRunningAfterStop: probe.keepaliveRunning,
+      });
+      assert.ok(sendsBeforeStop >= 3, `探针 Service 应至少投递 3 次，实际 ${sendsBeforeStop}`);
+      assert.equal(probe.keepaliveRunning, false, 'stop() 之后发送循环不应仍在运行');
+    } finally {
+      await probe.stop().catch(() => {});
+    }
+  }
+
   // ── A: baseline, no WebSocket activity ──────────────────────────────────────
   if (wanted('A')) {
     await phase('A', async (entry) => {
       const before = service.openCount();
+      const windowStartedAt = Date.now();
+      // Sampled for the whole configured window, not until the first disappearance.
+      // Returning early would make "no reconnect" a claim about ~31 seconds while the
+      // evidence says the baseline ran for 100, and a worker that came back later (or
+      // a socket that reopened) inside the remaining time would go unnoticed.
       const window = await observe({
         port: options.port,
         extensionId,
         service,
-        until: (state) => state.workerPresent === false && state.socketOpen === false,
-        timeoutMs: options.baselineSeconds * 1000,
+        until: () => Date.now() - windowStartedAt >= options.baselineSeconds * 1000,
+        timeoutMs: options.baselineSeconds * 1000 + 5000,
       });
       const reclaim = window.transitions.find((t) => t.workerPresent === false);
       const socketDropped = window.transitions.find((t) => t.socketOpen === false);
+      // Any transition after the loss means the baseline was not quiet after all.
+      const workerComesBack = window.transitions.some(
+        (t) => t.workerPresent === true && reclaim !== undefined && t.t > reclaim.t,
+      );
+      const socketReopens = window.transitions.some(
+        (t) => t.socketOpen === true && socketDropped !== undefined && t.t > socketDropped.t,
+      );
       result.timings.baselineReclaimMs = reclaim ? reclaim.t : null;
       result.timings.baselineSocketDropMs = socketDropped ? socketDropped.t : null;
+      result.timings.baselineWindowMs = window.durationMs;
       record('A', 'baseline-window', {
         durationMs: window.durationMs,
         reclaims: reclaimsIn(window),
         socketDrops: window.transitions.filter((t) => t.socketOpen === false).length,
         socketDroppedAfterMs: result.timings.baselineSocketDropMs,
+        workerComesBack,
+        socketReopens,
         workerTargetsSeen: [...new Set(window.samples.map((s) => s.workerTargets))],
+        samplesTaken: window.samples.length,
       });
       // Both halves are recorded through `check`, not only printed: the evidence file
       // is the record a reviewer reads, so an assertion that never reaches it is an
@@ -486,10 +545,19 @@ try {
       });
       check(
         entry,
-        'A 基线：socket 随 Worker 一起断开，且未重连',
-        socketDropped !== undefined && service.openCount() === 0,
-        { socketDroppedAfterMs: result.timings.baselineSocketDropMs },
+        'A 基线：socket 随 Worker 一起断开，且在完整窗口内没有重连',
+        socketDropped !== undefined && !socketReopens && !workerComesBack,
+        {
+          socketDroppedAfterMs: result.timings.baselineSocketDropMs,
+          windowMs: window.durationMs,
+          socketReopens,
+          workerComesBack,
+        },
       );
+      check(entry, `A 基线：观察窗口覆盖配置的 ${options.baselineSeconds}s`, window.durationMs >= options.baselineSeconds * 1000, {
+        windowMs: window.durationMs,
+        samplesTaken: window.samples.length,
+      });
     });
   }
 
@@ -518,24 +586,32 @@ try {
 
       const sent = service.keepaliveSends.length - sendsBefore;
       const windowSends = service.keepaliveSends.slice(sendsBefore);
-      // What the cadence claim actually needs: the frames that did arrive must be
-      // ~20s apart, and there must be enough of them to have carried the window.
-      // Counting only `floor(window / 20)` would demand a frame at exactly t=window,
-      // which is outside the window by definition — 29 sends over 600s *is* a 20s
-      // cadence, and the gap check is what proves it.
+      // What the cadence claim actually needs: every gap must sit near one period, and
+      // the number of sends must match what that cadence can produce over the window.
+      // A ceiling on the gap alone would accept a second loop or a 1s timer — those
+      // only shrink the gaps — so the lower bound and the maximum count are what
+      // actually pin the confirmed 20s contract. `floor(window / 20)` as a minimum
+      // would instead demand a frame at exactly t=window, which is outside the window
+      // by definition; the gap check is what proves the cadence, the count check only
+      // proves coverage.
       const gaps = windowSends
         .slice(1)
         .map((send, index) => send.at - windowSends[index].at);
       const maxGapMs = gaps.length > 0 ? Math.max(...gaps) : null;
       const minGapMs = gaps.length > 0 ? Math.min(...gaps) : null;
       const expected = Math.ceil((options.keepaliveSeconds * 1000) / KEEPALIVE_INTERVAL_MS);
-      // One period plus slack for the sampling loop and timer drift.
-      const gapToleranceMs = KEEPALIVE_INTERVAL_MS / 2;
+      // ±15% around one period covers timer drift and the POC's own 250ms polls.
+      const gapMinMs = KEEPALIVE_INTERVAL_MS * 0.85;
+      const gapMaxMs = KEEPALIVE_INTERVAL_MS * 1.15;
+      // One send opens the loop; the rest are periodic. Anything more per period means
+      // something is sending outside the confirmed cadence.
+      const maxSends = Math.ceil((options.keepaliveSeconds * 1000) / KEEPALIVE_INTERVAL_MS) + 1;
       const repliesDuringWindow = service.since(framesBefore);
       result.timings.repliesDuringKeepaliveWindow = repliesDuringWindow.length;
       result.timings.keepaliveWindowMs = keepaliveWindow.durationMs;
       result.timings.keepaliveSent = sent;
       result.timings.keepaliveExpectedAtLeast = expected;
+      result.timings.keepaliveExpectedAtMost = maxSends;
       result.timings.keepaliveMaxGapMs = maxGapMs;
       result.timings.keepaliveMinGapMs = minGapMs;
       record('B', 'keepalive-window', {
@@ -543,6 +619,7 @@ try {
         sent,
         minGapMs,
         maxGapMs,
+        gapsWithinBand: gaps.every((gap) => gap >= gapMinMs && gap <= gapMaxMs),
         reconnects: service.bridgeCount() - 1,
         reclaims: reclaimsIn(keepaliveWindow),
         repliesFromBridge: repliesDuringWindow.length,
@@ -555,13 +632,15 @@ try {
       check(
         entry,
         `B 窗口内投递间隔保持 ${KEEPALIVE_INTERVAL_MS / 1000}s（实测 ${seconds(minGapMs ?? 0)}–${seconds(maxGapMs ?? 0)}s）`,
-        maxGapMs !== null && maxGapMs <= KEEPALIVE_INTERVAL_MS + gapToleranceMs,
-        { minGapMs, maxGapMs, toleranceMs: gapToleranceMs },
+        maxGapMs !== null && minGapMs >= gapMinMs && maxGapMs <= gapMaxMs,
+        { minGapMs, maxGapMs, allowedBandMs: [gapMinMs, gapMaxMs] },
       );
-      check(entry, `B 窗口 >= 10 分钟且投递次数覆盖整个窗口（${sent} 次 >= ${expected}）`, sent >= expected, {
-        expectedAtLeast: expected,
-        windowMs: keepaliveWindow.durationMs,
-      });
+      check(
+        entry,
+        `B 投递节奏既是 20s 也不高于 20s：${sent} 次落在 ${expected}–${maxSends} 之间`,
+        sent >= expected && sent <= maxSends,
+        { expectedAtLeast: expected, expectedAtMost: maxSends, windowMs: keepaliveWindow.durationMs },
+      );
       check(
         entry,
         `B 整个保活窗口内 Bridge 一帧都没有回（${sent} 次投递 → ${repliesDuringWindow.length} 条回帧）`,
@@ -649,6 +728,13 @@ try {
         jobId: running.jobId,
       });
 
+      // From here to the next probe is a keepalive-only window inside RUNNING: the Job
+      // is in flight, so nothing but KEEPALIVE should reach the Bridge. Counting every
+      // frame the Bridge sent in that window is what catches a state-dependent
+      // violation — a STATUS or a keyed RESULT per keepalive would otherwise slip past
+      // the shape-specific filters further down.
+      const framesBeforeQuietWindow = service.mark();
+      const sendsBeforeQuietWindow = service.keepaliveSends.length;
       // Wait until the Job has been running across two full periods, then probe: that
       // is what "spans multiple keepalive cycles" has to mean.
       await until(
@@ -658,6 +744,21 @@ try {
         250,
       );
       const sentDuringJob = service.keepaliveSends.filter((send) => send.at >= jobStartAt).length;
+      const quietWindowFrames = service.since(framesBeforeQuietWindow);
+      const quietWindowSends = service.keepaliveSends.length - sendsBeforeQuietWindow;
+      record('E', 'running-quiet-window', {
+        keepaliveSent: quietWindowSends,
+        repliesFromBridge: quietWindowFrames.length,
+      });
+      check(
+        entry,
+        `E RUNNING 期间的保活窗口内 Bridge 没有回帧（${quietWindowSends} 次投递 → ${quietWindowFrames.length} 条回帧）`,
+        quietWindowSends >= 2 && quietWindowFrames.length === 0,
+        {
+          keepaliveSent: quietWindowSends,
+          replies: quietWindowFrames.map((message) => message.type),
+        },
+      );
 
       const stillRunning = await service.getStatus(6000);
       check(entry, 'E 跨多个 keepalive 周期后 currentJob 未被改写', stillRunning.state === 'RUNNING' && stillRunning.jobId === jobId, {
@@ -687,9 +788,30 @@ try {
       await closePage(options.port, sole.id);
       await until(async () => (await httpPages(options.port)).length === 0, 8000, 'Work Tab 关闭', 250);
 
-      const before = service.mark();
+      const framesBeforeQuietWindow = service.mark();
+      const sendsBeforeQuietWindow = service.keepaliveSends.length;
       // Two keepalive periods, so the window is real rather than a single frame.
       await sleep(KEEPALIVE_INTERVAL_MS * 2 + 2000);
+
+      // Keepalive-only window inside NOT_READY: no probe has been sent yet, so any
+      // frame the Bridge produced here is a response to KEEPALIVE. Checking the type
+      // of the reply is not enough — a NOT_READY-specific violation would be a
+      // STATUS, which the previous literal-`KEEPALIVE` filter could never see.
+      const quietWindowFrames = service.since(framesBeforeQuietWindow);
+      const quietWindowSends = service.keepaliveSends.length - sendsBeforeQuietWindow;
+      record('F', 'not-ready-quiet-window', {
+        keepaliveSent: quietWindowSends,
+        repliesFromBridge: quietWindowFrames.length,
+      });
+      check(
+        entry,
+        `F NOT_READY 期间的保活窗口内 Bridge 没有回帧（${quietWindowSends} 次投递 → ${quietWindowFrames.length} 条回帧）`,
+        quietWindowSends >= 2 && quietWindowFrames.length === 0,
+        {
+          keepaliveSent: quietWindowSends,
+          replies: quietWindowFrames.map((message) => message.type),
+        },
+      );
 
       const status = await service.getStatus(8000);
       check(entry, 'F NOT_READY 期间 KEEPALIVE 不改变状态', status.state === 'NOT_READY', {
@@ -709,8 +831,6 @@ try {
       check(entry, 'F NOT_READY 期间 socket 仍可达', service.openCount() > 0, {
         openConnections: service.openCount(),
       });
-      const stray = service.since(before).filter((message) => message.type === 'KEEPALIVE');
-      check(entry, 'F Bridge 仍未对 KEEPALIVE 作出应答', stray.length === 0);
 
       // Two tabs: the ambiguous case, which must stay ambiguous.
       await openPage(options.port, pages.urlFor('/one'));
@@ -731,12 +851,17 @@ try {
 
       await service.stop();
       check(entry, 'G Service 停止后 KEEPALIVE 发送循环已清理', service.keepaliveRunning === false);
-      const leakedIntervals = process
-        ._getActiveHandles()
-        .filter((handle) => handle?.constructor?.name === 'Timeout' && handle._repeat);
-      check(entry, 'G 进程内没有残留的周期定时器', leakedIntervals.length === 0, {
-        leakedIntervals: leakedIntervals.length,
-      });
+      // Deliberately *not* an introspection check here or anywhere else.
+      // `process._getActiveHandles()` does not expose a live `setInterval` as a
+      // `Timeout` on current Node, so filtering it returns an empty list whether or not
+      // a timer leaked — an assertion that can never fail is worse than no assertion.
+      //
+      // Waiting out a period here to look for stray sends would also push this
+      // scenario's service outage past the Worker idle window, turning G into another
+      // reclaim observation and costing it the reconnection it exists to test. The
+      // cleanup is therefore verified once, up front, in the probe below. Its bounded
+      // form — the process exiting on its own after `stop()` — lives in
+      // `tests/poc-harness.test.js`.
 
       // The default outage is deliberately shorter than the idle window the baseline
       // measures. That is what makes this scenario about *reconnection*: the worker

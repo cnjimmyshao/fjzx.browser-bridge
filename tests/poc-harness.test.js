@@ -315,3 +315,35 @@ test('execute 复用 jobId 时不会返回上一次的 RESULT', async () => {
     await service.stop();
   }
 });
+
+test('service.stop() 会清掉保活定时器，进程不会因此挂住', async () => {
+  // The child deliberately never calls `process.exit()`: if the keepalive interval
+  // survives `stop()`, Node stays alive and the run hangs — which is the real symptom
+  // of the leak, and the only honest way to detect it here. Introspection does not
+  // work: `process._getActiveHandles()` omits a live `setInterval` on current Node, so
+  // a filtered list is empty whether or not a timer leaked.
+  const script = [
+    `import { startTestService, KEEPALIVE_INTERVAL_MS } from ${JSON.stringify(pathToFileURL(SERVICE).href)};`,
+    'const service = await startTestService();',
+    'const socket = new WebSocket(service.url);',
+    'await new Promise((resolve, reject) => {',
+    '  socket.addEventListener("open", resolve, { once: true });',
+    '  socket.addEventListener("error", reject, { once: true });',
+    '});',
+    'service.startKeepalive(KEEPALIVE_INTERVAL_MS / 100);',
+    'await new Promise((r) => setTimeout(r, 200));',
+    "console.log('SENT', service.keepaliveSends.length);",
+    'await service.stop();',
+    "console.log('STOPPED');",
+    '// No process.exit(): the event loop must drain on its own.',
+    "await new Promise((r) => setTimeout(r, 300));",
+    "console.log('DRAINED');",
+  ].join('\n');
+
+  const { code, stdout, stderr } = await runNode(['--input-type=module', '-e', script], '', 15000);
+
+  assert.equal(code, 0, `子进程未能自行退出（保活定时器可能泄漏）。stdout: ${stdout} stderr: ${stderr}`);
+  assert.match(stdout, /SENT [1-9]\d*/);
+  assert.match(stdout, /STOPPED/);
+  assert.match(stdout, /DRAINED/);
+});
