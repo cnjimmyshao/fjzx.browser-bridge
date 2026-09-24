@@ -36,7 +36,7 @@ npm run poc       # V1 端到端 + Page Context 三个附加场景（18/18）
 npm run poc:context  # 请求上下文（16/16）
 ```
 
-证据文件：`docs/research/evidence/page-request-context.json`（本次 `poc:context` 运行自动写入）。它只含 cookie **名字**与掩码串、不含 cookie 值；环境只记录平台、Node 版本与浏览器 build（以 UA 表示），不写入本机绝对路径或用户名——这个文件会被提交，绝对路径等于把运行者的目录结构与用户名带出机器。本次 `npm run poc` 的输出即终端结果本身，未另存文件；下表逐条列出观察到的结果。
+证据文件：`docs/research/evidence/page-request-context.json`（本次 `poc:context` 运行自动写入）。它只含 cookie **名字**与掩码串、不含 cookie 值；环境只记录平台、Node 版本、浏览器 build 与页面 UA，不写入本机绝对路径或用户名——这个文件会被提交，绝对路径等于把运行者的目录结构与用户名带出机器。注意页面 UA 是**精简 UA**（`HeadlessChrome/153.0.0.0`），真正的 patch build 记在 `environment.browser`（`Chrome/153.0.8010.52`）。本次 `npm run poc` 的输出即终端结果本身，未另存文件；下表逐条列出观察到的结果。
 
 ## 结果
 
@@ -71,7 +71,7 @@ npm run poc:context  # 请求上下文（16/16）
 | 并发 | `RUNNING` 期间取上下文照常应答，且不影响正在执行的 Job |
 | EXECUTE → 上下文 → 重放 | 先用 EXECUTE 从页面读到资源 URL，再按该 URL 取上下文，Node 重放得到与浏览器相同的字节；该 EXECUTE 的 RESULT 同时带 Page Context |
 
-### 单元测试（`npm test`，本次 288 项全通过）
+### 单元测试（`npm test`，当前 head 294 项全通过）
 
 其中与本次能力直接相关、且 POC 无法观察的部分：
 

@@ -562,8 +562,10 @@ try {
         environment: {
           platform: `${process.platform} ${release()} ${arch()}`,
           node: process.version,
-          // Names the Chrome build the run used; a browser observation without a
-          // version is not evidence.
+          // The build Chrome reports over CDP. The page's user agent is a *reduced*
+          // one (`HeadlessChrome/153.0.0.0`), so on its own it cannot substantiate
+          // which patch build a run used.
+          browser: browser?.browser ?? null,
           userAgent: pageUserAgent,
         },
         service: service?.url ?? null,
