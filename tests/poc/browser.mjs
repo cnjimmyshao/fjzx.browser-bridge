@@ -332,8 +332,29 @@ export async function launchBrowser(options) {
   }
 
   const deadline = Date.now() + 45000;
+  /**
+   * How long a dead launcher plus a refused port has to persist before it counts as
+   * a failed start.
+   *
+   * The spawned process exiting is *not* by itself a startup failure: on Windows this
+   * Chrome hands the session to another process and the launcher exits with code 0
+   * while the endpoint is still coming up. A refused connection alongside a dead
+   * launcher is stronger evidence — nothing is listening — but it is still only
+   * evidence, because there is a short window during the handoff where the old
+   * process has gone and the new one has not bound the port yet. Giving up on the
+   * first few refusals would turn that window back into the startup failure this
+   * whole branch exists to stop reporting.
+   *
+   * So there is a deliberate grace period below. Five seconds is far more than the
+   * handoff needs in practice — the endpoint opens within a poll or two of the
+   * launcher exiting — while still reporting a genuinely dead executable in seconds
+   * instead of waiting out the full readiness deadline. The point is that "dead
+   * launcher plus refused port" is evidence, not proof, so it needs to persist
+   * before it is treated as a failed start.
+   */
+  const REFUSAL_GRACE_MS = 5000;
   let lastVersionError = null;
-  let refusedAfterExit = 0;
+  let refusedSince = null;
   while (Date.now() < deadline) {
     let version = null;
     try {
@@ -346,24 +367,19 @@ export async function launchBrowser(options) {
 
     if (version) return { port, profile, pid: child.pid, browser: version.Browser, stop };
 
-    // The spawned process exiting is *not* by itself a startup failure: on Windows
-    // this Chrome hands the session to another process and the launcher exits with
-    // code 0 while the endpoint is still coming up. Treating that as "port did not
-    // open" fails a healthy start, so an exit is only a hint.
-    //
-    // A *refused* connection alongside a dead launcher is different: nothing is
-    // listening and nothing is coming, so waiting out the full deadline would report
-    // a generic timeout instead of the exit code that explains it.
     if (child.exitCode !== null && isConnectionRefused(lastVersionError)) {
-      refusedAfterExit += 1;
-      if (refusedAfterExit >= 4) {
+      refusedSince ??= Date.now();
+      if (Date.now() - refusedSince >= REFUSAL_GRACE_MS) {
         await removeProfile(profile);
         throw new Error(
-          `浏览器进程已退出（退出码 ${child.exitCode}），调试端口 ${port} 没有打开。`,
+          `浏览器进程已退出（退出码 ${child.exitCode}），调试端口 ${port} 在 ${REFUSAL_GRACE_MS}ms 内一直没有打开。`,
         );
       }
     } else {
-      refusedAfterExit = 0;
+      // Anything other than "dead launcher + refused port" restarts the window: a
+      // port that answers but stalls, or a process still running, is not evidence of
+      // a failed start.
+      refusedSince = null;
     }
 
     await sleep(250);

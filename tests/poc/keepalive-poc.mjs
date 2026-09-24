@@ -103,6 +103,30 @@ function parseArgs(argv) {
     options.reconnectDownSeconds = 10;
     options.evidence = join(tmpdir(), 'keepalive-poc-smoke.json');
   }
+
+  // A phase is only meaningful after the ones it builds on. `--phases C2` on its own
+  // would run ordinary GET_STATUS/EXECUTE traffic while still claiming to check the
+  // keepalive contract, which is worse than refusing: a green subset run that never
+  // sent a single KEEPALIVE. Refusing keeps every selectable combination honest.
+  const PHASE_DEPENDENCIES = {
+    A: [],
+    B: [],
+    C2: ['B'],
+    D: ['B'],
+    E: [],
+    F: ['E'],
+    G: ['E'],
+  };
+  for (const name of options.phases) {
+    const known = Object.keys(PHASE_DEPENDENCIES);
+    if (!known.includes(name)) {
+      throw new Error(`未知场景 ${name}；可用：${known.join(', ')}`);
+    }
+    const missing = PHASE_DEPENDENCIES[name].filter((need) => !options.phases.includes(need));
+    if (missing.length > 0) {
+      throw new Error(`场景 ${name} 需要同时选择 ${missing.join(', ')}；--phases 不接受依赖不完整的子集`);
+    }
+  }
   return options;
 }
 
@@ -296,10 +320,10 @@ async function phase(name, body) {
     entry.ok = false;
     entry.error = error.message;
     console.log(`  ✖ ${name}: ${error.message}`);
-    // Only the A/B/D scenarios are about the mechanism itself; a failed one has to
-    // fail the run. C2/E/F depend on a live worker that A/B/D may have been unable
-    // to produce, so they report rather than mask the first failure.
-    if (['A', 'B', 'D'].includes(name)) throw error;
+    // No phase is allowed to fail quietly. They all assert required behaviour, so a
+    // failing one is a broken run rather than an optional diagnostic — continuing
+    // would let the remaining phases test a Bridge in a state the run never explains.
+    throw error;
   } finally {
     entry.durationMs = Date.now() - STARTED_AT - entry.startedAt;
   }
@@ -373,7 +397,15 @@ async function wakeWorker(phaseName) {
   return revived.ms;
 }
 
-const options = parseArgs(process.argv.slice(2));
+let options;
+try {
+  options = parseArgs(process.argv.slice(2));
+} catch (error) {
+  // A bad invocation is a usage error, not a crash: a Phase-1 stack trace would bury
+  // the one line that says which phase selection is not allowed.
+  console.error(`✖ ${error.message}`);
+  process.exit(2);
+}
 result.options = options;
 result.commit = commitSha();
 result.workingTreeDirty = workingTreeStatus() || '';
@@ -464,14 +496,12 @@ try {
   // ── B: 20s KEEPALIVE for >= 10 minutes ──────────────────────────────────────
   let keepaliveWindow = null;
   let keepaliveStartedAt = null;
-  let probeStart = null;
 
   if (wanted('B')) {
     await phase('B', async (entry) => {
       await wakeWorker('B');
-      const sendMark = service.keepaliveSends.length;
+      const sendMark = service.mark();
       keepaliveStartedAt = Date.now();
-      probeStart = service.mark();
       service.startKeepalive();
       record('B', 'keepalive-started', { intervalMs: KEEPALIVE_INTERVAL_MS });
 
@@ -485,6 +515,14 @@ try {
 
       const sent = service.keepaliveSends.length - sendMark;
       const expected = Math.floor(options.keepaliveSeconds / (KEEPALIVE_INTERVAL_MS / 1000));
+      // Everything the Bridge sent back during the window. Sampled here, before the C2
+      // probes add replies of their own, this is the direct evidence for the "silent
+      // response" half of the contract: the Service sent KEEPALIVE frames and the
+      // Bridge answered none of them. Checking only for a literal `type: "KEEPALIVE"`
+      // reply would miss the far likelier wrong implementations — a STATUS or RESULT
+      // per keepalive.
+      const repliesDuringWindow = service.since(sendMark);
+      result.timings.repliesDuringKeepaliveWindow = repliesDuringWindow.length;
       result.timings.keepaliveWindowMs = keepaliveWindow.durationMs;
       result.timings.keepaliveSent = sent;
       result.timings.keepaliveExpectedAtLeast = expected;
@@ -493,15 +531,22 @@ try {
         sent,
         reconnects: service.bridgeCount() - 1,
         reclaims: reclaimsIn(keepaliveWindow),
+        repliesFromBridge: repliesDuringWindow.length,
       });
 
-      check(entry, `B 保活窗口内 worker 从未被回收（${seconds(keepaliveWindow.durationMs)}s）`, reclaimsIn(keepaliveWindow) === 0, {
+      check(entry, `B 保活窗口内 Worker 从未被回收（${seconds(keepaliveWindow.durationMs)}s）`, reclaimsIn(keepaliveWindow) === 0, {
         reconnects: service.bridgeCount() - 1,
       });
       check(entry, 'B 窗口内 socket 始终 OPEN', keepaliveWindow.samples.every((s) => s.socketOpen));
       check(entry, `B 窗口 >= 10 分钟且 KEEPALIVE 按 20s 投递（${sent} 次）`, sent >= expected, {
         expectedAtLeast: expected,
       });
+      check(
+        entry,
+        `B 整个保活窗口内 Bridge 一帧都没有回（${sent} 次投递 → ${repliesDuringWindow.length} 条回帧）`,
+        repliesDuringWindow.length === 0,
+        { replies: repliesDuringWindow.map((message) => message.type) },
+      );
     });
   }
 
@@ -521,10 +566,6 @@ try {
       check(entry, 'C2 无副作用 EXECUTE → RESULT ok=true', executed.ok === true, {
         data: executed.data,
       });
-
-      // Nothing the Bridge sent may be an answer to KEEPALIVE.
-      const stray = service.since(probeStart).filter((message) => message.type === 'KEEPALIVE');
-      check(entry, 'C2 Bridge 从未对 KEEPALIVE 作出应答', stray.length === 0);
     });
   }
 
@@ -561,16 +602,23 @@ try {
   if (wanted('E')) {
     await phase('E', async (entry) => {
       await wakeWorker('E');
+      // Restart the loop rather than inherit B's phase. The claim under test is "the
+      // Job survives periodic frames", so the frames have to be counted from the
+      // Job's own start — inheriting a loop already 600s into its cadence would make
+      // how many frames land inside the Job depend on where the Job happens to begin.
+      service.stopKeepalive();
       service.startKeepalive();
-      record('E', 'keepalive-restarted');
+      record('E', 'keepalive-restarted', { intervalMs: KEEPALIVE_INTERVAL_MS });
 
-      // Longer than two keepalive periods, so the Job spans at least three frames.
       const jobId = service.nextJobId('running-keepalive');
       const from = service.mark();
+      const jobStartAt = Date.now();
       const job = service.execute({
         jobId,
-        timeoutMs: 30000,
-        script: 'await new Promise((r) => setTimeout(r, 25000)); return "long-done";',
+        // Comfortably longer than two periods, so at least two periodic frames land
+        // inside the Job instead of only the synchronous one that opened the loop.
+        timeoutMs: 90000,
+        script: 'await new Promise((r) => setTimeout(r, 45000)); return "long-done";',
       });
       await sleep(1500);
 
@@ -580,11 +628,24 @@ try {
         jobId: running.jobId,
       });
 
-      await sleep(3000);
+      // Wait until the Job has been running across two full periods, then probe: that
+      // is what "spans multiple keepalive cycles" has to mean.
+      await until(
+        () => Date.now() - jobStartAt >= KEEPALIVE_INTERVAL_MS * 2 + 2000,
+        60000,
+        'RUNNING 期间跨越两个 keepalive 周期',
+        250,
+      );
+      const sentDuringJob = service.keepaliveSends.filter((send) => send.at >= jobStartAt).length;
+
       const stillRunning = await service.getStatus(6000);
       check(entry, 'E 跨多个 keepalive 周期后 currentJob 未被改写', stillRunning.state === 'RUNNING' && stillRunning.jobId === jobId, {
         state: stillRunning.state,
         jobId: stillRunning.jobId,
+        keepaliveSentDuringJob: sentDuringJob,
+      });
+      check(entry, 'E 该 Job 期间确实投递了两次周期性 KEEPALIVE', sentDuringJob >= 2, {
+        keepaliveSentDuringJob: sentDuringJob,
       });
 
       const settled = await job;
@@ -765,15 +826,16 @@ try {
   if (pages) await pages.close();
   if (browser) await browser.stop();
 
-  // A failed phase only fails the run when it was about the mechanism itself. The
-  // scenarios that depend on a live worker report their own outcome instead, so the
-  // first real failure is what the exit code reflects. Missing evidence also fails:
-  // the run's whole output is the record a reviewer has to be able to read.
-  const fatallyFailed = result.phases.some(
-    (entry) => !entry.ok && ['A', 'B', 'D'].includes(entry.phase),
-  );
+  // Any requested phase failing fails the run: they all assert required behaviour, and
+  // a green exit code next to a summary that lists failed scenarios is how a
+  // regression gets waved through. Missing evidence fails too — the evidence file is
+  // the record a reviewer has to be able to read.
+  const failedPhases = result.phases.filter((entry) => !entry.ok);
   process.exitCode =
-    fatallyFailed || result.summary?.fatal || result.evidenceWriteFailed || result.evidenceIncomplete
+    failedPhases.length > 0 ||
+    result.summary?.fatal ||
+    result.evidenceWriteFailed ||
+    result.evidenceIncomplete
       ? 1
       : 0;
 }

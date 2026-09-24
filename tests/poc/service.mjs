@@ -267,13 +267,23 @@ async function runCli(argv) {
   print(`  endpoint  ${service.url}`);
   print('  把上面的地址填进扩展设置页的 Service URL，Bridge 连上后即可发消息。');
 
+  // The real Service keeps the WebSocket receiving; without this a manual session
+  // goes quiet after ~30s, Chrome reclaims the worker and later commands have no
+  // Bridge to reach. Started here for a standalone run only — the POC drives the
+  // loop itself, because it has to switch it on and off per scenario.
+  service.startKeepalive();
+  print(`  已启动保活：每 ${Math.round(service.keepaliveIntervalMs / 1000)}s 发送一次 KEEPALIVE。`);
+
+  /** Cleanup shared by both modes, so neither leaves a timer or a socket behind. */
+  const shutdown = async () => {
+    await service.stop();
+    process.exit(0);
+  };
+
   if (!interactive) {
     print('');
     print('未开启交互模式：只打印往来帧。加 --interactive 可手工发 EXECUTE。');
-    process.on('SIGINT', async () => {
-      await service.stop();
-      process.exit(0);
-    });
+    process.on('SIGINT', shutdown);
     return;
   }
 
@@ -325,8 +335,7 @@ async function runCli(argv) {
 
   reader.on('close', async () => {
     print('');
-    await service.stop();
-    process.exit(0);
+    await shutdown();
   });
 }
 
