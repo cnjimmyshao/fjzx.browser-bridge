@@ -5,6 +5,8 @@
 - Status：**当前 head 的新实测**，不是既有报告转述。原始证据见 [evidence/keepalive-poc.json](evidence/keepalive-poc.json)。
 - 相关：[ADR 0001](../decisions/0001-service-keepalive.md)、[Current §3.1 / §8.7](../current/architecture.md#31-mv3-空闲回收与-service-保活keepalive)、[既有观察整理](2026-09-23-existing-browser-evidence.md)。
 
+> **证据版本说明（必读）：** 下面与证据文件里的数字来自 **`d734d9f`**。此后按两轮 review 收紧过 POC 的断言（A 采满整个基线窗口、B 补间隔下界与次数上界、E/F 按窗口断言 Bridge 回帧为 0、G 的定时器清理改用探针 + Node 回归），这些改动**尚未产生新的完整浏览器运行**：本机 Chrome for Testing 在复查期间无法稳定启动（见 §未完成的验证）。因此：保活机制本身的结论仍然有效，但证据文件描述的断言集比当前 `tests/poc/keepalive-poc.mjs` 旧一版。当前代码的 Node 证据是完整的（`npm test` 237/237）。
+
 ## 问题与验收范围
 
 Bridge 依赖 Service 能向既有 WebSocket 随时 push `EXECUTE`。既有报告（#9）显示 MV3 Worker 空闲约 30s 被回收，socket 与重连 timer 一同消失。ADR 0001 因此决定由 **Service 每 20s 发送 `{"type":"KEEPALIVE"}`**。
@@ -68,6 +70,16 @@ Bridge 依赖 Service 能向既有 WebSocket 随时 push `EXECUTE`。既有报�
 - `npm run poc` 的 15/15 结果只在运行日志中，JSON 证据文件只覆盖保活场景。
 - Worker 存活只有一个布尔信号（`service_worker` target 在不在）。不附着 DevTools 就只能观察它的存在，看不到内部计时器、Pending 事件或回收原因。
 - 唤醒被回收的 Worker 依赖真实设置页写入；这是操作者动作，不是机制本身的一部分。
+
+## 未完成的验证
+
+两轮 review 之后收紧的断言在写这份说明时**还没有跑出新的完整浏览器证据**：
+
+- 哪些改动已有浏览器证据：第二轮 review 的「交棒后不再用短宽限期判定启动失败」（`ca59b3c`）已在真实运行中被验证——同一个 `--smoke` 命令在旧宽限期下连续 8 次以「调试端口未打开」失败，去掉宽限期后立即跑完 7/7、30/30 断言。
+- 哪些改动只有 Node 级证据：第二轮其余改动（A 采满基线窗口、B 的间隔下界与次数上界、E/F 按窗口断言回帧为 0、G 的清理探针）以及 `tests/poc-harness.test.js` 的定时器回归。`npm test` **237/237** 通过。
+- 判定力已单独核对：让 Bridge 对每个 KEEPALIVE 回一条 `STATUS` 时，旧的按类型过滤看到 **0** 条违规，新的按回帧总数判定看到 **7** 条并失败；定时器回归删掉 `clearInterval` 后会超时失败。
+- 阻塞原因：复查期间本机 Chrome for Testing 无法稳定启动——有时立即以 0 退出且端口始终不开，有时报出 `/json/version` 后随即退出，最后完全不再启动。同一命令行在不同时刻结果不同，与该机器的负载相关；期间另有其它项目持续运行 Chrome for Testing 实例。这不是本次改动的行为。
+- 因此**尚未**声称：收紧后的 A/B/E/F/G 断言在真实浏览器上通过。恢复可用的浏览器后应重跑 `npm run poc:keepalive` 并更新证据文件。
 
 ## 对 Contract 的影响
 
