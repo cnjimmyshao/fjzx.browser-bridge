@@ -61,13 +61,27 @@ function parseArgs(argv) {
 const results = [];
 const observations = [];
 
+/**
+ * How a failure is written into the evidence file.
+ *
+ * The assertions here are ours, so their text is useful and safe to keep. Anything
+ * else can quote what only the terminal should see: `launchBrowser`, for one, names
+ * the absolute executable and profile paths in its errors, and this file is
+ * committed. Those are recorded by kind only, and the full text still goes to the
+ * terminal where a path is useful.
+ */
+function describeFailure(error) {
+  const kind = typeof error?.name === 'string' && error.name !== '' ? error.name : 'Error';
+  return kind === 'AssertionError' ? String(error.message) : `${kind}（完整信息见终端输出）`;
+}
+
 async function scenario(name, body) {
   try {
     await body();
     results.push({ name, ok: true });
     console.log(`  ✔ ${name}`);
   } catch (error) {
-    results.push({ name, ok: false, error: error.message });
+    results.push({ name, ok: false, error: describeFailure(error) });
     console.log(`  ✖ ${name}\n      ${error.message}`);
   }
 }
@@ -530,7 +544,7 @@ try {
     assert.equal(reply.error.code, 'NOT_READY');
   });
 } catch (error) {
-  results.push({ name: '前置准备 / 场景编排', ok: false, error: error.message });
+  results.push({ name: '前置准备 / 场景编排', ok: false, error: describeFailure(error) });
   console.log(`  ✖ 前置准备 / 场景编排\n      ${error.message}`);
 } finally {
   const failed = results.filter((entry) => !entry.ok);
