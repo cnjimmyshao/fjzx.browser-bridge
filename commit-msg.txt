@@ -1,5 +1,0 @@
-fix(issue-25): 证据记录完整浏览器 build，Research 的测试计数对齐当前 head
-
-- 页面 UA 是精简 UA（HeadlessChrome/153.0.0.0），单靠它无法证明跑的是 153.0.8010.52；
-  evidence 的 environment 增加 browser（launchBrowser 从 /json/version 拿到的完整 build）。
-- Research 的单元测试计数从 288 更新为当前 head 的 294，并说明精简 UA 与完整 build 的区别。
