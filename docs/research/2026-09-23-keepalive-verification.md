@@ -19,7 +19,7 @@ Bridge 依赖 Service 能向既有 WebSocket 随时 push `EXECUTE`。既有报�
 | OS | Windows 10.0.26200 x64 |
 | Node | v26.7.0（项目要求 >= 22） |
 | 扩展 | 本仓库 `src/` 直接加载，无打包 |
-| 提交 | 实现与测试在 `11ebd13`；证据文件自身在 `2205ed9`，该提交只新增证据文件，未改 `src/` 或 `tests/`。证据文件的 `commit` / `workingTreeDirty` 记录运行当时的 HEAD 与工作区状态，据此可核对它跑的就是 `11ebd13`。 |
+| 提交 | 实现与测试在 `d734d9f`；证据文件在 `3907d8c` 之后的提交里，那些提交只改 `docs/`、以及收紧 harness 断言本身，未改 `src/`。证据文件的 `commit` / `workingTreeDirty` 记录运行当时的 HEAD 与工作区状态，据此可核对它跑的就是 `d734d9f`。 |
 | 测试 Service | `tests/poc/service.mjs`，真实 TCP WebSocket |
 | 测试页面 | 本机静态页（`tests/poc/page-server.mjs`） |
 | 独立 Profile | 每次运行新建，运行结束删除 |
@@ -35,19 +35,23 @@ Bridge 依赖 Service 能向既有 WebSocket 随时 push `EXECUTE`。既有报�
 
 ## 结果
 
-场景 A–G 全部通过：**7/7 场景、27/27 断言，总耗时 760.1s**。数值以证据文件为准，下面记录可复核的结论。
+场景 A–G 全部通过：**7/7 场景、29/29 断言，总耗时 780.5s**。数值以证据文件为准，下面记录可复核的结论。
 
 | 场景 | 结果 |
 | --- | --- |
 | A 基线（无 WebSocket 活动） | 连接后 **30.9s** Worker 被回收，socket 在同一采样点断开（`service_worker` target 1 → 0），窗口内无重连。 |
-| B 20s KEEPALIVE ≥ 10 分钟 | 窗口 **600.2s**、投递 **31** 次（≥ 预期 30）：回收 **0** 次、socket 全程 OPEN。窗口起点的重连计数为 2，都来自此前唤醒 Worker 的两次设置页写入（每次约 0.25s 恢复），不是保活窗口内发生的重连。 |
-| C2 长空闲后探针 | `GET_STATUS` 得到 `STATUS`（IDLE），无副作用 `EXECUTE` 得到 `RESULT ok=true`；整轮 Bridge 发回的消息只有这些应答，没有一条是给 KEEPALIVE 的。 |
-| D 停止 KEEPALIVE | 停止后 **30.9s** Worker 被回收；距最后一次投递 **30.9s**，与 A 的基线和既有报告的 29.8s 同一量级。 |
-| E RUNNING 期间 KEEPALIVE | 跨越多个 keepalive 周期的 25s Job 全程 `RUNNING` + 原 `jobId`，未出现 `BUSY`，也没有无 `jobId` 的 `RESULT`；原 Job 正常结束。 |
-| F NOT_READY 期间 KEEPALIVE | 无 Work Tab（`WORK_TAB_CLOSED`）与多 Work Tab（仍为 `MULTIPLE_TABS`）两种情况下状态与 reason 都不变，未创建或代选 Tab，socket 仍可达，仍无应答。 |
+| B 20s KEEPALIVE ≥ 10 分钟 | 窗口 **600.7s**：投递 **31** 次、相邻间隔 **20.006–20.016s**、回收 **0** 次、socket 全程 OPEN，并且这 31 次投递换来 **0** 条 Bridge 回帧——窗口内唯一的 WebSocket 流量就是 KEEPALIVE，Bridge 一帧都没有回。窗口起点的重连计数为 2，都来自此前唤醒 Worker 的两次设置页写入（每次约 0.25s 恢复）。 |
+| C2 长空闲后探针 | `GET_STATUS` 得到 `STATUS`（IDLE），无副作用 `EXECUTE` 得到 `RESULT ok=true`。 |
+| D 停止 KEEPALIVE | 停止后 **31.0s** Worker 被回收；距最后一次投递 **31.6s**，与 A 的基线同一量级。 |
+| E RUNNING 期间 KEEPALIVE | 45s Job 期间确实投递了 2 次周期性 KEEPALIVE，全程 `RUNNING` + 原 `jobId`，未出现 `BUSY`，也没有无 `jobId` 的 `RESULT`；原 Job 正常结束。 |
+| F NOT_READY 期间 KEEPALIVE | 无 Work Tab（`WORK_TAB_CLOSED`）与多 Work Tab（仍为 `MULTIPLE_TABS`）两种情况下状态与 reason 都不变，未创建或代选 Tab，socket 仍可达。 |
 | G Service 断开 | `stop()` 后发送循环已清理、进程内无残留周期定时器；Service 离线 12s 期间 Worker 未被回收，重启后 Bridge **11.1s** 重连，保活恢复投递且仍只有一个循环。 |
 
-本报告采用 `11ebd13` 上那一次完整运行（760.1s）作为证据。同一天还完整跑过 A–G 三次（`5ab9579` 一次、`11ebd13` 两次，其中较早一次只用于排查 harness 自身缺陷）：基线回收时间稳定在 30.8–30.9s，停止保活后的回收时间同为 30.8–30.9s，Service 恢复后的重连耗时 11.1–13.2s，保活窗口内回收每次都是 0 次。
+本报告采用 `d734d9f` 上这一次完整运行（780.5s）作为证据。同一天还完整跑过 A–G 三次（`5ab9579` 一次、`11ebd13` 两次，其中较早一次只用于排查 harness 自身缺陷）：基线回收时间稳定在 30.8–30.9s，停止保活后的回收时间同为 30.8–31.0s，Service 恢复后的重连耗时 11.1–13.2s，保活窗口内回收每次都是 0 次。
+
+### 测量过程本身被记录下来的地方
+
+`d734d9f` 之前一版 B 场景用的期望次数是 `floor(窗口/20)`，在 600s 窗口上要求 t=600 那一帧也被计入——而它按定义落在窗口之外。该版本因此以「29 次投递」判失败，同时暴露了退出码修复确实生效（失败不再返回 0）。现在的写法改为同时检查两件真正要保证的事：**相邻投递间隔**（实测 20.006–20.016s）与**次数是否覆盖窗口**（31 ≥ 30），并把 min/max gap 记入证据文件。
 
 ## 限制与未覆盖项
 
@@ -55,7 +59,9 @@ Bridge 依赖 Service 能向既有 WebSocket 随时 push `EXECUTE`。既有报�
 - 若 Service 离线时间超过 Worker 空闲窗口，重连 timer 随 Worker 一起消失，Service 恢复后不会自动重连（既有 #9 问题）。G 场景默认把离线时间设在空闲窗口**以内**，因此它验证的是重连后保活恢复；若实际发生回收，POC 不会把它算成通过。
 - 单一 Chrome 版本、单一 Windows 机器、`headless=new`。headed 模式与其它 Chrome 版本是否同样回收未在本次验证。
 - 只使用本机地址、本机测试页与独立 Profile；没有真实站点、真实账号或真实业务 Job 参与。
-- 验证运行时工作区里还有未提交的文档改动（`docs/` 下），`src/`、`tests/` 与 `package.json` 相对 `11ebd13` 是干净的；文档提交之后未再改动 `src/`。精确清单见证据文件的 `workingTreeDirty`。
+- `--phases` 只接受依赖完整的子集（C2/D 需要 B，F/G 需要 E），否则启动前直接拒绝：依赖不全的子集可能跑出「一条 KEEPALIVE 都没发却显示通过」的结果。
+- 验证运行时工作区里还有未提交的文档与 harness 改动（`docs/`、`tests/poc/keepalive-poc.mjs`），`src/` 与 `package.json` 相对 `d734d9f` 是干净的；证据文件里的 `workingTreeDirty` 就是这份清单。
+- E 场景的 Job 只跨越**两次**周期性投递，即刚好满足「跨多个周期」；没有测更长 Job 或更多帧的组合。
 
 ## 证据文件里看不到的东西
 
@@ -67,6 +73,6 @@ Bridge 依赖 Service 能向既有 WebSocket 随时 push `EXECUTE`。既有报�
 
 本次实测支持把 §3.1 / §8.7 记录的 KEEPALIVE 作为已落地机制：它维持了连接活性，并且在 RUNNING / NOT_READY / 断开恢复三条路径上没有副作用。它不改变四种核心应答消息，也不新增 Bridge 侧 timer、健康检查或重试。
 
-同一 revision 上另跑了 `npm run poc`（= `node tests/poc/run-poc.mjs`）：V1 的 **15/15 个场景全部通过**，说明这次为修 harness 而改的 `tests/poc/browser.mjs` 没有影响既有 V1 链路。该结果只在运行日志里，没有写进本报告的 JSON 证据文件。
+同一 revision 上另跑了 `npm run poc`（= `node tests/poc/run-poc.mjs`）：V1 的 **15/15 个场景全部通过**，说明这次为修 harness 而改的 `tests/poc/browser.mjs` 与 `tests/poc/service.mjs` 没有影响既有 V1 链路。该结果只在运行日志里，没有写进本报告的 JSON 证据文件。
 
 观测细节、时序与未覆盖项以 [evidence/keepalive-poc.json](evidence/keepalive-poc.json) 为准；本报告不替代该文件，也不替维护者作出合并或关闭 #9/#18 的决定。

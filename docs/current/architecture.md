@@ -302,11 +302,11 @@ POC 使用 Chrome for Testing（branded Chrome 142+ 与 Edge 会忽略 `--load-e
 | 场景 | 内容 |
 | --- | --- |
 | A | 建立连接后不发任何消息，观察至少 90s：Worker 是否被回收、socket 何时断开 |
-| B | 每 20s 一次 KEEPALIVE，连续至少 10 分钟：worker 与 socket 是否持续可用 |
-| C2 | 长时间无业务 Job 后 GET_STATUS / 无副作用 EXECUTE 是否立即成功，且 Bridge 从未应答 KEEPALIVE |
+| B | 每 20s 一次 KEEPALIVE，连续至少 10 分钟：Worker 与 socket 是否持续可用、投递间隔是否保持、Bridge 是否始终不作答 |
+| C2 | 长时间无业务 Job 后 GET_STATUS / 无副作用 EXECUTE 是否立即成功 |
 | D | 停止 KEEPALIVE 后，记录 Chrome 的实际 idle 回收时间 |
-| E | RUNNING 的 Job 跨越多个 keepalive 周期：不返回 BUSY、jobId 不被改写、原 Job 正常 RESULT |
+| E | RUNNING 的 Job 跨越两个 keepalive 周期：不返回 BUSY、jobId 不被改写、原 Job 正常 RESULT |
 | F | NOT_READY（无 Tab / 多 Tab）期间：状态不变、不创建 Tab、不任选一个、socket 仍可达 |
 | G | Service 断开：发送循环被清理且无残留定时器；重连后保活恢复 |
 
-它只读 `CDP /json/list` 元数据，**从不附着 Worker DevTools**（附着会让 Worker 一直存活，使测量失去意义），也不在保活窗口内跑 GET_STATUS/EXECUTE 探针。证据写在 `docs/research/evidence/keepalive-poc.json`，含环境、提交、时序与未覆盖项；`npm run poc` 的 12 个 V1 场景不受影响。
+它只读 `CDP /json/list` 元数据，**从不附着 Worker DevTools**（附着会让 Worker 一直存活，使测量失去意义），也不在保活窗口内跑 GET_STATUS/EXECUTE 探针。任何被选中的场景失败都会使运行以非零退出码结束；`--phases` 也不接受依赖不完整的子集（C2/D 需要 B，F/G 需要 E），避免跑出「一条 KEEPALIVE 都没发却显示通过」的结果。证据写在 `docs/research/evidence/keepalive-poc.json`，含环境、提交、时序与未覆盖项；`npm run poc` 的 12 个 V1 场景不受影响。

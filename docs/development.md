@@ -56,6 +56,8 @@ docs/                     Current、Research、Decision 和开发说明
 
    默认跑 A、B、C2、D、E、F、G 全部场景，其中 B 是 10 分钟保活窗口，整轮约 15–18 分钟。参数：`--keepalive-seconds`、`--baseline-seconds`、`--stop-seconds`、`--reconnect-down-seconds`、`--phases A,B,...`、`--evidence <path>`。场景含义与证据字段见 [架构文档第 13.1 节](current/architecture.md#131-保活31--87的-poc-对应)。
 
+   `--phases` 只接受依赖完整的子集：C2/D 需要 B，F/G 需要 E（分别复用它们建立的保活循环与状态）。`--phases C2` 这类调用会在启动前被拒绝，而不是跑出一份「没发送过一条 KEEPALIVE 却显示通过」的结果。
+
    先用 `--smoke` 跑一遍更省时间：它把三个窗口缩短到 100s/60s/100s，并强制把证据写到临时目录，因此一次约 4 分钟就能确认整条场景编排没坏。它的结果**不是**保活验证，证据文件里也会写明这一点。
 
    > `--evidence` 默认覆盖 `docs/research/evidence/keepalive-poc.json`；用短窗口或子集试跑时请指定别的路径（`--smoke` 已自动如此），否则会把缩水的运行写进证据文件。
@@ -78,7 +80,9 @@ docs/                     Current、Research、Decision 和开发说明
 4. 打开扩展 Options，保存终端打印的 Service URL；专用 Profile 中只保留一个普通网页作为 Work Tab。
 5. 在终端输入脚本函数体，例如 `return document.title`；`:status` 请求当前状态，`:input <json>` 设置后续输入，`:quit` 退出。
 
-不加 `--interactive` 时测试 Service 打印往来帧。其他测试客户端的使用方式以测试 Service 的实际接口为准；Bridge 本身仍主动连接 Service。
+测试 Service 启动时会同时启动保活循环，因此终端每 20 秒会看到一条 `→ {"type":"KEEPALIVE"}`。这是必要的：手工会话一旦静默约 30s，Chrome 会回收 Worker 并断开 socket，之后的 `:status` 或脚本就再也到不了 Bridge。不加 `--interactive` 时只打印往来帧，同样带保活。其他测试客户端的使用方式以测试 Service 的实际接口为准；Bridge 本身仍主动连接 Service。
+
+> 保活 POC 自己按场景开关这个循环（见 `tests/poc/keepalive-poc.mjs`），所以基线场景仍然能观察到无活动时的回收。
 
 ### 运行前的一次性设置
 
