@@ -6,6 +6,8 @@ import {
   ERROR_CODES,
   PARSE_FAILURES,
   SERVICE_MESSAGE_TYPES,
+  createRequestContextError,
+  createRequestContextOk,
   createResultError,
   createResultOk,
   createStatus,
@@ -13,9 +15,18 @@ import {
   parseServiceMessage,
 } from '../src/lib/protocol.js';
 
-test('the frozen V1 message set contains exactly four types and three codes', () => {
-  assert.deepEqual(Object.values(SERVICE_MESSAGE_TYPES), ['EXECUTE', 'GET_STATUS']);
-  assert.deepEqual(Object.values(BRIDGE_MESSAGE_TYPES), ['RESULT', 'STATUS']);
+test('the frozen V1 four messages and three codes are unchanged, plus the context pair', () => {
+  // The V1 set is frozen by docs/current/architecture.md §8, so the first two
+  // entries of each list are asserted in order and must never drift. The context
+  // pair (issue #25, §14) is appended deliberately and carries its own error-code
+  // set in `request-context.js`: it never widens ERROR_CODES, and removing it
+  // again would leave the four V1 messages untouched.
+  assert.deepEqual(Object.values(SERVICE_MESSAGE_TYPES), [
+    'EXECUTE',
+    'GET_STATUS',
+    'GET_REQUEST_CONTEXT',
+  ]);
+  assert.deepEqual(Object.values(BRIDGE_MESSAGE_TYPES), ['RESULT', 'STATUS', 'REQUEST_CONTEXT']);
   assert.deepEqual(Object.values(ERROR_CODES), [
     'BUSY',
     'NOT_READY',
@@ -179,12 +190,43 @@ test('builds a successful RESULT, mapping undefined to null', () => {
   });
 });
 
+test('a successful RESULT carries the page context it was given, and nothing when not', () => {
+  const pageContext = {
+    available: true,
+    workTabUrl: 'https://example.test/page',
+    userAgent: 'UA/1.0',
+    documentReferrer: '',
+    documentId: 'doc-1',
+  };
+  assert.deepEqual(createResultOk('job-7', 1, pageContext).pageContext, pageContext);
+
+  // The state machine always passes one; this only pins that the field is not
+  // invented out of nothing.
+  assert.equal('pageContext' in createResultOk('job-7', 1), false);
+});
+
 test('builds a failed RESULT with only a V1 error code', () => {
   assert.deepEqual(createResultError('job-8', ERROR_CODES.BUSY, 'busy'), {
     type: 'RESULT',
     jobId: 'job-8',
     ok: false,
     error: { code: 'BUSY', message: 'busy' },
+  });
+});
+
+test('builds the request-context pair, which is not shaped like a Job', () => {
+  const context = { targetUrl: 'https://cdn.test/media/1', cookieHeader: 'sid=1' };
+  assert.deepEqual(createRequestContextOk('rc-1', context), {
+    type: 'REQUEST_CONTEXT',
+    requestId: 'rc-1',
+    ok: true,
+    context,
+  });
+  assert.deepEqual(createRequestContextError('rc-2', 'CONTEXT_FAILED', '失败'), {
+    type: 'REQUEST_CONTEXT',
+    requestId: 'rc-2',
+    ok: false,
+    error: { code: 'CONTEXT_FAILED', message: '失败' },
   });
 });
 

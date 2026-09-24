@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { BRIDGE_STATES, createBridgeState } from '../src/lib/bridge-state.js';
+import { PAGE_CONTEXT_REASONS, unavailablePageContext } from '../src/lib/page-context.js';
 import { ERROR_CODES } from '../src/lib/protocol.js';
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -67,17 +68,51 @@ function createControlledExecutor() {
   };
 }
 
-function createHarness({ workTab = createFakeWorkTab(), connection, executor } = {}) {
+/** Page-context stand-in: one document of the Work Tab the harness pretends to drive. */
+const REPORTED_PAGE_CONTEXT = {
+  available: true,
+  workTabUrl: 'https://work.test/page',
+  userAgent: 'StubUA/1.0',
+  documentReferrer: '',
+  documentId: 'doc-1',
+};
+
+function createPageContextStub(pageContext = REPORTED_PAGE_CONTEXT) {
+  const calls = [];
+  return {
+    calls,
+    async read(request) {
+      calls.push(request);
+      return pageContext;
+    },
+  };
+}
+
+/**
+ * A successful RESULT as the protocol writes it. Spelling the page context out in
+ * every expectation would bury what each test is actually about.
+ */
+const okResult = (jobId, data, pageContext = REPORTED_PAGE_CONTEXT) => ({
+  type: 'RESULT',
+  jobId,
+  ok: true,
+  data,
+  pageContext,
+});
+
+function createHarness({ workTab = createFakeWorkTab(), connection, executor, pageContext } = {}) {
   const conn = connection ?? createFakeConnection();
   const exec = executor ?? createControlledExecutor();
+  const page = pageContext ?? createPageContextStub();
   const states = [];
   const bridge = createBridgeState({
     connection: conn,
     workTab,
     executor: exec,
+    pageContext: page,
     onStateChange: (state) => states.push(state),
   });
-  return { bridge, connection: conn, executor: exec, workTab, states };
+  return { bridge, connection: conn, executor: exec, workTab, pageContext: page, states };
 }
 
 const execute = (jobId, extra = {}) =>
@@ -144,7 +179,7 @@ test('a Job runs IDLE -> RUNNING -> RESULT -> IDLE', async () => {
   await handling;
 
   assert.deepEqual(h.connection.sent, [
-    { type: 'RESULT', jobId: 'job-2', ok: true, data: { answer: 42 } },
+    okResult('job-2', { answer: 42 }),
   ]);
   assert.equal(h.bridge.state, BRIDGE_STATES.IDLE);
   assert.equal(h.bridge.currentJobId, null);
@@ -199,12 +234,7 @@ test('a second EXECUTE while RUNNING is answered BUSY and leaves the first Job a
   await h.executor.settle('first-result');
   await first;
 
-  assert.deepEqual(h.connection.sent.at(-1), {
-    type: 'RESULT',
-    jobId: 'job-first',
-    ok: true,
-    data: 'first-result',
-  });
+  assert.deepEqual(h.connection.sent.at(-1), okResult('job-first', 'first-result'));
 });
 
 test('EXECUTE while NOT_READY is refused without starting the executor', async () => {
@@ -330,12 +360,13 @@ test('the Work Tab disappearing mid-Job does not disturb the Job in flight', asy
   await h.executor.settle('ok');
   await handling;
 
-  assert.deepEqual(h.connection.sent.at(-1), {
-    type: 'RESULT',
-    jobId: 'job-9',
-    ok: true,
-    data: 'ok',
-  });
+  // The Job did run, so its RESULT is a success — and because the Work Tab is gone
+  // there is no page to describe, which the RESULT says instead of guessing.
+  assert.deepEqual(
+    h.connection.sent.at(-1),
+    okResult('job-9', 'ok', unavailablePageContext(PAGE_CONTEXT_REASONS.WORK_TAB_UNAVAILABLE)),
+  );
+  assert.equal(h.pageContext.calls.length, 0, '没有可绑定的 Work Tab 时不应去读页面');
   assert.equal(h.bridge.state, BRIDGE_STATES.NOT_READY, '完成后按实际 Work Tab 条件定状态');
 });
 
@@ -346,6 +377,7 @@ test('a dropped RESULT is logged rather than queued or thrown', async () => {
     connection,
     workTab: createFakeWorkTab(),
     executor: { execute: async () => 'data' },
+    pageContext: createPageContextStub(),
     logger: { info: () => {}, warn: (...args) => warnings.push(args.join(' ')) },
   });
 
@@ -361,6 +393,7 @@ test('a throwing state-change handler cannot break the Job', async () => {
     connection,
     workTab: createFakeWorkTab(),
     executor: { execute: async () => 1 },
+    pageContext: createPageContextStub(),
     onStateChange: () => {
       throw new Error('handler exploded');
     },
@@ -368,7 +401,7 @@ test('a throwing state-change handler cannot break the Job', async () => {
 
   await assert.doesNotReject(() => bridge.handleMessage(execute('job-11')));
   assert.deepEqual(connection.sent, [
-    { type: 'RESULT', jobId: 'job-11', ok: true, data: 1 },
+    okResult('job-11', 1),
   ]);
 });
 
@@ -394,7 +427,7 @@ test('a frame delivered on the current endpoint is handled normally', async () =
   await handling;
 
   assert.deepEqual(h.connection.sent, [
-    { type: 'RESULT', jobId: 'job-19', ok: true, data: 'ok' },
+    okResult('job-19', 'ok'),
   ]);
 });
 
@@ -445,7 +478,7 @@ test('a Job that resolves with undefined still produces a JSON-compatible RESULT
   await handling;
 
   assert.deepEqual(h.connection.sent, [
-    { type: 'RESULT', jobId: 'job-12', ok: true, data: null },
+    okResult('job-12', null),
   ]);
 });
 
@@ -476,12 +509,7 @@ test('a value whose inspection throws fails the Job instead of stranding it', as
   await h.executor.settle('fine');
   await next;
 
-  assert.deepEqual(h.connection.sent.at(-1), {
-    type: 'RESULT',
-    jobId: 'job-21',
-    ok: true,
-    data: 'fine',
-  });
+  assert.deepEqual(h.connection.sent.at(-1), okResult('job-21', 'fine'));
 });
 
 test('a rejection value that cannot even be described still clears the Job', async () => {
@@ -507,12 +535,7 @@ test('a rejection value that cannot even be described still clears the Job', asy
   await flush();
   await h.executor.settle('fine');
   await next;
-  assert.deepEqual(h.connection.sent.at(-1), {
-    type: 'RESULT',
-    jobId: 'job-23',
-    ok: true,
-    data: 'fine',
-  });
+  assert.deepEqual(h.connection.sent.at(-1), okResult('job-23', 'fine'));
 });
 
 test('a RESULT is not delivered to a Service that did not submit the Job', async () => {
@@ -540,7 +563,7 @@ test('a RESULT survives a reconnect to the same endpoint', async () => {
   await handling;
 
   assert.deepEqual(h.connection.sent, [
-    { type: 'RESULT', jobId: 'job-14', ok: true, data: 'ok' },
+    okResult('job-14', 'ok'),
   ]);
 });
 
