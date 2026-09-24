@@ -197,6 +197,114 @@ try {
     assert.deepEqual(result.data, { received: { n: 21, label: 'from-service' }, doubled: 42 });
   });
 
+  // ── 附加：Page Context（issue #25）────────────────────────────────────────────
+  await scenario('附加：成功 RESULT 带回与当前页面一致的 Page Context', async () => {
+    const result = await service.execute({
+      script: "return { title: document.title, token: document.getElementById('doc-token').textContent };",
+    });
+    assert.equal(result.ok, true);
+
+    const pageContext = result.pageContext;
+    assert.equal(pageContext.available, true, JSON.stringify(pageContext));
+
+    // The page's own answers, read through a different route on purpose: the
+    // scenario must not agree with Bridge just because it asked Bridge.
+    const workTab = await soleWorkTab();
+    assert.equal(pageContext.workTabUrl, await evaluate(options.port, workTab, 'location.href'));
+    assert.equal(pageContext.userAgent, await evaluate(options.port, workTab, 'navigator.userAgent'));
+    assert.equal(
+      pageContext.documentReferrer,
+      await evaluate(options.port, workTab, 'document.referrer'),
+    );
+    assert.equal(typeof pageContext.documentId, 'string');
+    assert.ok(pageContext.documentId !== '', 'documentId 必须标出这次采样属于哪个文档');
+
+    // Page facts only: no cookie and nothing target-specific may appear here.
+    assert.deepEqual(Object.keys(pageContext).sort(), [
+      'available',
+      'documentId',
+      'documentReferrer',
+      'userAgent',
+      'workTabUrl',
+    ]);
+    console.log(`      → documentId=${pageContext.documentId} token=${result.data.token}`);
+  });
+
+  await scenario('附加：同一 URL 重载后 documentId 变化，Page Context 跟随文档', async () => {
+    const workTab = await soleWorkTab();
+    const first = await service.execute({
+      script: "return document.getElementById('doc-token').textContent;",
+    });
+    const firstToken = first.data;
+    const firstDocumentId = first.pageContext.documentId;
+
+    await evaluate(options.port, workTab, "location.reload(); 'go'");
+    await waitUntil(
+      async () =>
+        (await evaluate(options.port, workTab, "document.getElementById('doc-token')?.textContent")) !==
+        firstToken,
+      8000,
+      '页面没有在期限内重载',
+    );
+
+    const second = await service.execute({
+      script: "return document.getElementById('doc-token').textContent;",
+    });
+    assert.notEqual(second.data, firstToken, '确实换了一个文档');
+    assert.equal(second.pageContext.workTabUrl, first.pageContext.workTabUrl, 'URL 没有变');
+    assert.notEqual(
+      second.pageContext.documentId,
+      firstDocumentId,
+      'documentId 必须跟着文档换，否则重载与旧文档无法区分',
+    );
+  });
+
+  await scenario('附加：导航竞争时只给同一文档的事实，或明确降级', async () => {
+    const workTab = await soleWorkTab();
+    const url = await evaluate(options.port, workTab, 'location.href');
+
+    const before = await service.execute({
+      script: "return document.getElementById('doc-token').textContent;",
+    });
+    const beforeToken = before.data;
+
+    // The Job's own script starts the reload and returns: from here the page facts
+    // are read while the document is being replaced, which is the race this
+    // scenario is about.
+    const raced = await service.execute({ script: "location.reload(); return 'reload-triggered';" });
+
+    await waitUntil(
+      async () =>
+        (await evaluate(options.port, workTab, "document.getElementById('doc-token')?.textContent")) !==
+        beforeToken,
+      8000,
+      '页面没有在期限内重载',
+    );
+    const after = await service.execute({
+      script: "return document.getElementById('doc-token').textContent;",
+    });
+
+    assert.equal(raced.ok, true, JSON.stringify(raced));
+    assert.equal(raced.data, 'reload-triggered');
+
+    const pageContext = raced.pageContext;
+    if (pageContext.available) {
+      // Either document of this URL is a truthful answer; a mixture would not be.
+      assert.equal(pageContext.workTabUrl, url);
+      assert.ok(
+        [before.pageContext.documentId, after.pageContext.documentId].includes(pageContext.documentId),
+        `采样必须属于某一个已知文档，实际 ${pageContext.documentId}（旧 ${before.pageContext.documentId} / 新 ${after.pageContext.documentId}）`,
+      );
+      console.log(`      → 竞争期间取到文档 ${pageContext.documentId}`);
+    } else {
+      assert.ok(
+        ['PAGE_FACTS_UNAVAILABLE', 'WORK_TAB_UNAVAILABLE'].includes(pageContext.reason),
+        `降级原因必须是已定义的技术原因，实际 ${pageContext.reason}`,
+      );
+      console.log(`      → 竞争期间如实降级：${pageContext.reason}`);
+    }
+  });
+
   // ── 6 ───────────────────────────────────────────────────────────────────────
   await scenario('6. 长 Job 时 STATUS=RUNNING + 正确 jobId', async () => {
     const jobId = service.nextJobId('long');

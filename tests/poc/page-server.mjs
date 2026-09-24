@@ -5,9 +5,10 @@ import { createServer } from 'node:http';
  *
  * Everything here exists to make Bridge's behaviour observable without touching a
  * real site: a readable DOM, a button whose effect is visible, a page-world
- * variable (which is what proves the script runs isolated from the page), and a
- * variant that merely *mentions* a challenge so the POC can show Bridge treats it
- * as ordinary page content.
+ * variable (which is what proves the script runs isolated from the page), a
+ * per-document token (which is what proves two reads came from one document), and
+ * a variant that merely *mentions* a challenge so the POC can show Bridge treats
+ * it as ordinary page content.
  *
  * Not shipped, and not part of the extension. Bridge's source contains no site
  * business semantics; this file is where a fake website is allowed to.
@@ -23,9 +24,15 @@ function renderPage(body, inlineScript = '') {
   </head>
   <body>
     ${body}
+    <div id="doc-token" hidden></div>
     <script>
       window.__pageSecret = 'set-by-the-page-world';
       window.__pageClicks = 0;
+      // A fresh value per document, in the *DOM* so a USER_SCRIPT read can see it
+      // too: the isolate world shares the document, not the page's globals. This is
+      // what lets a scenario tell "the same document was read twice" from "the page
+      // was reloaded in between" without using Bridge's own documentId.
+      document.getElementById('doc-token').textContent = Math.random().toString(36).slice(2);
       const button = document.getElementById('work-button');
       if (button) {
         button.addEventListener('click', () => {

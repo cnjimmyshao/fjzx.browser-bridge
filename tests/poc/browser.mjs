@@ -204,6 +204,34 @@ export async function evaluate(port, targetId, expression) {
 }
 
 /**
+ * Override the user agent for one page target only.
+ *
+ * The request-context POC needs this to prove *which* navigator an answer follows:
+ * a page-level override changes what the page reports while the extension service
+ * worker keeps the browser's own value, so a context sampled in the worker would
+ * be wrong. Nothing else in the harness needs a raw CDP call.
+ *
+ * The override belongs to the CDP *session* that set it — closing the connection
+ * reverts the page — so this returns a handle the caller closes when it is done.
+ *
+ * @param {number} port @param {string} targetId @param {string} userAgent
+ * @returns {Promise<{close: () => void}>}
+ */
+export async function setUserAgentOverride(port, targetId, userAgent) {
+  const target = (await listTargets(port)).find((candidate) => candidate.id === targetId);
+  if (!target) throw new Error(`找不到目标 ${targetId}`);
+
+  const client = await connect(target.webSocketDebuggerUrl);
+  try {
+    await client.send('Network.setUserAgentOverride', { userAgent });
+  } catch (error) {
+    client.close();
+    throw error;
+  }
+  return { close: () => client.close() };
+}
+
+/**
  * Open a page and return *that* page's target id.
  *
  * `/json/new` answers with the target it created, so the id is taken from the
@@ -268,6 +296,39 @@ async function removeProfile(profile, timeoutMs = 10000) {
 }
 
 /**
+ * The command line Bridge's POC browsers are started with.
+ *
+ * Exported because the flags carry decisions worth checking without launching
+ * anything (see `tests/poc-harness.test.js`).
+ *
+ * `--do-not-de-elevate` is not optional garnish: when the runner itself is
+ * elevated, Chrome relaunches itself with that flag and the process we spawned
+ * exits immediately. `launchBrowser` treats a dead child as "this endpoint is not
+ * ours" — deliberately — so without the flag the whole POC fails to start from an
+ * elevated shell, with a message about the debugging port. Passing it ourselves
+ * makes Chrome stay in the process we started; when the runner is not elevated it
+ * changes nothing.
+ *
+ * @param {{port: number, profile: string, extensionPath: string, headless?: boolean}} options
+ */
+export function browserArgs({ port, profile, extensionPath, headless = true }) {
+  const args = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${profile}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--remote-allow-origins=*',
+    '--do-not-de-elevate',
+    '--disable-features=Translate,OptimizationHints',
+    `--load-extension=${extensionPath}`,
+    `--disable-extensions-except=${extensionPath}`,
+  ];
+  if (headless) args.push('--headless=new', '--disable-gpu');
+  args.push('about:blank');
+  return args;
+}
+
+/**
  * @param {{exe: string, extensionPath: string, port?: number, profile?: string, headless?: boolean}} options
  */
 export async function launchBrowser(options) {
@@ -299,18 +360,7 @@ export async function launchBrowser(options) {
   }
   mkdirSync(profile, { recursive: true });
 
-  const args = [
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${profile}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--remote-allow-origins=*',
-    '--disable-features=Translate,OptimizationHints',
-    `--load-extension=${extensionPath}`,
-    `--disable-extensions-except=${extensionPath}`,
-  ];
-  if (headless) args.push('--headless=new', '--disable-gpu');
-  args.push('about:blank');
+  const args = browserArgs({ port, profile, extensionPath, headless });
 
   // `stdio: 'ignore'` keeps the browser detached from this process's stdio.
   const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
