@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { launchBrowser, evaluate, openPage } from './poc/browser.mjs';
+import { browserArgs, launchBrowser, evaluate, openPage } from './poc/browser.mjs';
 import { startTestService } from './poc/service.mjs';
 
 /**
@@ -181,6 +181,25 @@ test('浏览器路径不可执行时返回失败，而不是让 error 事件掀�
     /无法启动浏览器/,
   );
   assert.equal(existsSync(profile), false, '启动失败时不应留下 profile');
+});
+
+test('启动参数让 Chrome 留在我们启动的那个进程里', () => {
+  // Elevated runners are the reason this is asserted rather than assumed: Chrome
+  // then relaunches itself with `--do-not-de-elevate` and the process we spawned
+  // exits, which `launchBrowser` reads as "this endpoint is not ours" — so without
+  // the flag the POC cannot start at all from an elevated shell (verified).
+  const args = browserArgs({ port: 9222, profile: 'C:\\tmp\\profile', extensionPath: 'C:\\ext' });
+  assert.ok(args.includes('--do-not-de-elevate'), '否则提权环境下 Chrome 会自己重启并让子进程先退出');
+  assert.ok(args.includes('--remote-debugging-port=9222'));
+  assert.ok(args.includes('--user-data-dir=C:\\tmp\\profile'));
+  assert.ok(args.includes('--load-extension=C:\\ext'));
+  assert.ok(args.includes('--headless=new'), '默认无头');
+  assert.equal(args.includes('--headless=new'), true);
+  assert.equal(
+    browserArgs({ port: 1, profile: 'p', extensionPath: 'e', headless: false }).includes('--headless=new'),
+    false,
+    'headed 模式不应带 --headless',
+  );
 });
 
 test('浏览器进程启动后立刻退出时，立即报退出码而不是等满 30s', async () => {

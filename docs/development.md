@@ -43,11 +43,17 @@ docs/                     Current、Research、Decision 和开发说明
    ```powershell
    npm run poc
    # 等价于 node tests/poc/run-poc.mjs
+   npm run poc:context
+   # 等价于 node tests/poc/request-context.mjs：请求上下文的场景
    ```
 
-   运行器启动本地页面、测试 Service 和独立测试浏览器，通过真实设置页配置 URL，并执行场景。常用参数：`--browser <chrome.exe>`、`--port <调试端口>`、`--headed`。场景与验收映射见 [架构文档第 13 节](current/architecture.md#13-poc-与本文档的对应)；以本次实际输出为准，不沿用旧 README 的场景数量、耗时或 PASS 数。
+   运行器启动本地页面、测试 Service 和独立测试浏览器，通过真实设置页配置 URL，并执行场景。常用参数：`--browser <chrome.exe>`、`--port <调试端口>`、`--headed`。场景与验收映射见 [架构文档第 13 节](current/architecture.md#13-poc-与本文档的对应)与[第 14.5 节](current/architecture.md#145-验证)；以本次实际输出为准，不沿用旧 README 的场景数量、耗时或 PASS 数。
+
+   提权 shell 下运行需要注意：Chrome 发现自己被提权启动时会带 `--do-not-de-elevate` 重启自身，我们启动的那个进程随即退出。harness 因此显式传入该参数，让浏览器留在被启动的进程里；未提权时它没有副作用。若换成别的启动方式并看到"浏览器进程已退出、调试端口没有打开"，先核对这一点，不要为通过测试放宽就绪判定。
 
 只使用独立测试 Profile 和本机测试页面，不依赖第三方网站或真实账号。不得把日常登录态、Cookie 或 Profile 目录提交到仓库。
+
+本次能力对应的实测环境、结果与未测项见 [Research](research/2026-09-24-page-request-context.md)。
 
 ## 手动加载与体验
 
@@ -76,6 +82,8 @@ Service URL 是唯一必要的持久配置，保存在 `chrome.storage.local`；
 协议字段、消息种类及错误码以 [Current](current/architecture.md#8-通信协议) 为准。以下沿用原 README 的实现说明，不新增协议：
 
 - 状态由 current Job 和 Work Tab 就绪情况推导；有 Job 时为 RUNNING，否则按就绪情况为 IDLE 或 NOT_READY。RUNNING 期间新 EXECUTE 返回 BUSY，不排队、不抢占原 Job。
+- 每个成功 RESULT 另带 `pageContext`：执行该 Job 的 Work Tab 页面事实。它不是 Job 结果的一部分，失败 RESULT 不带；取样失败时用 `available:false` + `reason` 明确降级。字段与语义见 [Current 第 14.1 节](current/architecture.md#141-page-context)。
+- 针对一个明确 `targetUrl` 的请求上下文走独立的 `GET_REQUEST_CONTEXT` / `REQUEST_CONTEXT`：不占 Job 槽、RUNNING 期间照常服务、也不要求 Allow User Scripts。见 [Current 第 14.2 节](current/architecture.md#142-request-context)。
 - 非法 JSON 或没有可用 jobId 的非法帧记录并忽略，不打断连接；失败帧仍有可用 jobId 时用 SCRIPT_EXECUTION_FAILED 返回 RESULT。
 - input 原样交给脚本。原 README 说明 metadata 仅接收、不解释、不转发；架构措辞尚需澄清，见 [Current 阅读边界](current/README.md#整理时保留的待澄清点)。不要从“透传”自行推导新增 RESULT 字段。
 - RESULT.ok 是技术执行成功，不是业务成功；没有 Job Queue、History、Retry、幂等或 Exactly Once 的新增承诺。
@@ -105,7 +113,7 @@ return { title, out: document.getElementById('out').textContent };
 
 ## 权限
 
-既有 manifest 的权限用途：storage 保存配置及会话绑定；tabs 用于识别 URL／内部页变化；userScripts 用于 USER_SCRIPT 执行；host_permissions 的 `<all_urls>` 提供目标页执行权限，不编码具体站点。无 optional_permissions 或 content script 的新增设计。实际声明见 [manifest](../src/manifest.json)，协议约束见 Current；本次不增加或删除权限。
+既有 manifest 的权限用途：storage 保存配置及会话绑定；tabs 用于识别 URL／内部页变化；userScripts 用于 USER_SCRIPT 执行；host_permissions 的 `<all_urls>` 提供目标页执行权限，不编码具体站点；scripting 读取 Work Tab 页面自己的 UA / referrer（worker 代答不了，page context 与请求上下文都用它）；cookies 读取**一个明确 URL** 的 Cookie（请求上下文用，`cookies` 权限本身不新增安装警告）。无 optional_permissions 或 content script 的新增设计。实际声明见 [manifest](../src/manifest.json)，协议与数据边界见 [Current 第 14 节](current/architecture.md#14-page-context-与-request-context)。代码中不存在 `getAll({})` / `getAll({domain})`，Cookie 值不落盘、不进日志。
 
 ## Service 连接
 

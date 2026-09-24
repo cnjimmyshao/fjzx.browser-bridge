@@ -10,6 +10,7 @@
 
 - [0001：Bridge、Service 与 Service Script 的职责边界](0001-bridge-service-responsibility-boundary.md)
 - [0002：唯一 Work Tab 与单一活动 Job](0002-single-work-tab-single-job.md)
+- [0003：Page Context 与 Request Context 分成两层](0003-page-context-vs-request-context.md)
 
 这些 ADR 用来解释 Current 中已经存在、未来容易被重新争论的核心取舍；它们不另行定义消息字段、错误码、权限或实现细节。若 ADR 与 Current 出现冲突，以 Current 为当前 Contract，并按 Issue / Decision 流程修正冲突。
 

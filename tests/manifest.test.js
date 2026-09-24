@@ -26,7 +26,21 @@ test('permissions stay at the minimum V1 needs', () => {
   //                 Tab navigating to a browser page goes unnoticed and keeps being
   //                 reported as bound (verified).
   //   userScripts — running Service JavaScript at all (V1.5)
-  assert.deepEqual(manifest.permissions, ['storage', 'tabs', 'userScripts']);
+  //   scripting   — the Work Tab's own page facts (issue #25): its user agent and
+  //                 `document.referrer`. Verified: a page-level user agent override
+  //                 is visible there and *not* in the service worker, so the worker
+  //                 cannot answer instead.
+  //   cookies     — the request context (issue #25): what the browser itself holds
+  //                 for one explicit target URL. `cookies` adds no warning text of
+  //                 its own, and the disclosed set is limited to `getAll({url})`;
+  //                 there is no `getAll({})` or `getAll({domain})` anywhere.
+  assert.deepEqual(manifest.permissions, [
+    'storage',
+    'tabs',
+    'userScripts',
+    'scripting',
+    'cookies',
+  ]);
 });
 
 test('the only host permission is <all_urls>, which names no site', () => {

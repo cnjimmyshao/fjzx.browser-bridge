@@ -1,0 +1,220 @@
+{
+  "at": "2026-09-24T09:08:24.846Z",
+  "issue": 25,
+  "extension": "src",
+  "environment": {
+    "platform": "win32 10.0.26200 x64",
+    "node": "v26.7.0",
+    "browser": "Chrome/153.0.8010.52",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
+  },
+  "service": "ws://127.0.0.1:37651",
+  "origin": "http://127.0.0.1:37650",
+  "summary": {
+    "total": 16,
+    "passed": 16,
+    "failed": []
+  },
+  "scenarios": [
+    {
+      "name": "1. 还没有 Work Tab 时，上下文请求如实回答 NOT_READY",
+      "ok": true
+    },
+    {
+      "name": "2. 打开受保护站点页面并登录（HttpOnly 会话 Cookie）",
+      "ok": true
+    },
+    {
+      "name": "3. 浏览器自己取到受保护资源（对照组）",
+      "ok": true
+    },
+    {
+      "name": "4. 未开启 Allow User Scripts 时上下文仍可用，并含 HttpOnly",
+      "ok": true
+    },
+    {
+      "name": "5. User-Agent 来自 Work Tab 页面，而不是扩展 service worker",
+      "ok": true
+    },
+    {
+      "name": "6. Node 仅用该上下文下载，得到与浏览器逐字节相同的资源",
+      "ok": true
+    },
+    {
+      "name": "7. 反例：缺少上下文任一部分都取不到资源",
+      "ok": true
+    },
+    {
+      "name": "8. 跨源目标：默认拒绝，显式 scope=TARGET_ONLY 才允许",
+      "ok": true
+    },
+    {
+      "name": "9. 分区 Cookie（CHIPS）：浏览器真的发了它，且只能选中一个分区",
+      "ok": true
+    },
+    {
+      "name": "10. 无关 origin 返回 0 个 cookie",
+      "ok": true
+    },
+    {
+      "name": "11. 非法目标一律拒绝",
+      "ok": true
+    },
+    {
+      "name": "12. 页面级 UA 覆盖后，上下文跟随页面而不是 worker",
+      "ok": true
+    },
+    {
+      "name": "13. 没有任何持久化：扩展存储里只有 Service URL",
+      "ok": true
+    },
+    {
+      "name": "14. 开启 Allow User Scripts 后：EXECUTE 与上下文请求并存，且 Job 不受影响",
+      "ok": true
+    },
+    {
+      "name": "15. Service 先用 EXECUTE 发现资源 URL，再按该 URL 取上下文并重放",
+      "ok": true
+    },
+    {
+      "name": "16. 没有 Work Tab 时拒绝（NOT_READY）",
+      "ok": true
+    }
+  ],
+  "observations": [
+    {
+      "name": "页面 JS 可见的 cookie",
+      "detail": {
+        "documentCookieMasked": "theme=***; strict=***"
+      }
+    },
+    {
+      "name": "Chrome 对同源子资源实际发出的头",
+      "detail": {
+        "headers": {
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate, br, zstd",
+          "accept-language": "zh-CN,zh;q=0.9",
+          "sec-ch-ua": "\"Chromium\";v=\"153\", \"Not_A Brand\";v=\"8\"",
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": "\"Windows\"",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-origin",
+          "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
+        },
+        "referer": "http://127.0.0.1:37650/feed",
+        "cookieNames": [
+          "sid",
+          "theme",
+          "strict"
+        ]
+      }
+    },
+    {
+      "name": "上下文（已脱敏）",
+      "detail": {
+        "cookieHeaderMasked": "sid=***; theme=***; strict=***",
+        "cookieMetadata": [
+          {
+            "name": "sid",
+            "domain": "127.0.0.1",
+            "path": "/",
+            "secure": false,
+            "httpOnly": true,
+            "sameSite": "lax",
+            "session": true,
+            "partitioned": false,
+            "topLevelSite": null
+          },
+          {
+            "name": "theme",
+            "domain": "127.0.0.1",
+            "path": "/",
+            "secure": false,
+            "httpOnly": false,
+            "sameSite": "lax",
+            "session": true,
+            "partitioned": false,
+            "topLevelSite": null
+          },
+          {
+            "name": "strict",
+            "domain": "127.0.0.1",
+            "path": "/",
+            "secure": false,
+            "httpOnly": false,
+            "sameSite": "strict",
+            "session": true,
+            "partitioned": false,
+            "topLevelSite": null
+          }
+        ],
+        "userAgentSource": "work-tab-page",
+        "observedAt": "2026-09-24T09:08:22.796Z"
+      }
+    },
+    {
+      "name": "Node 重放",
+      "detail": {
+        "status": 200,
+        "bytes": 65536,
+        "digest": "0a5ac7823509094c693dbbbb005fd3cf00f1b6c69b658ebedf8c8995a549db6d"
+      }
+    },
+    {
+      "name": "省略 UA 时服务端实际收到什么",
+      "detail": {
+        "userAgentSeen": "node",
+        "expected": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+        "note": "undici 的 fetch 默认发送 `user-agent: node`；这也是为什么\"重放必须显式设置 UA\"。"
+      }
+    },
+    {
+      "name": "分区 cookie 的可见性",
+      "detail": {
+        "browserSentItCrossSite": true,
+        "derivedBit": [
+          {
+            "name": "part",
+            "domain": "localhost",
+            "path": "/",
+            "secure": true,
+            "httpOnly": false,
+            "sameSite": "no_restriction",
+            "session": true,
+            "partitioned": true,
+            "topLevelSite": "http://127.0.0.1"
+          }
+        ],
+        "otherBit": [],
+        "withoutPartition": [],
+        "note": "同一个 URL：两位取值指向不同分区，互不包含；默认按 schemeful site 推导。"
+      }
+    },
+    {
+      "name": "UA 来源",
+      "detail": {
+        "contextUserAgent": "RequestContextPOC/9.9 (page-level override)",
+        "serviceWorkerUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
+      }
+    },
+    {
+      "name": "chrome.storage.local",
+      "detail": {
+        "keys": [
+          "serviceUrl"
+        ]
+      }
+    },
+    {
+      "name": "EXECUTE → 资源 URL → 请求上下文 → Node 重放",
+      "detail": {
+        "discovered": "http://127.0.0.1:37650/media/1",
+        "workTabUrl": "http://127.0.0.1:37650/feed",
+        "status": 200,
+        "digest": "0a5ac7823509094c693dbbbb005fd3cf00f1b6c69b658ebedf8c8995a549db6d"
+      }
+    }
+  ]
+}

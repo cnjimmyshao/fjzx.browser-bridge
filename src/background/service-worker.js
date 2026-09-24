@@ -1,4 +1,6 @@
 import { createBridgeState } from '../lib/bridge-state.js';
+import { createPageContextSource } from '../lib/page-context-source.js';
+import { createRequestContextSource } from '../lib/request-context-source.js';
 import { createServiceConfigSync } from '../lib/service-config.js';
 import { createServiceConnection } from '../lib/service-connection.js';
 import { createSettingsStore } from '../lib/settings-store.js';
@@ -9,6 +11,8 @@ import { createWorkTabManager } from '../lib/work-tab.js';
 /**
  * V1.2-V1.5 service worker: keep the Service WebSocket, bind the Work Tab, and
  * run the one Job the Service hands over in the Work Tab's USER_SCRIPT world.
+ * Every Job that succeeds is answered with the Work Tab's page facts, and a
+ * request context for one target URL is served on demand without taking a Job slot.
  *
  * Note that a Manifest V3 worker is not persistent: Chrome may terminate it when
  * idle, which also drops the socket. Every wake-up re-runs this module and
@@ -62,6 +66,11 @@ const bridge = createBridgeState({
   connection,
   workTab,
   executor: createUserScriptExecutor({ logger: console }),
+  // Both read browser facts through injected, lazily resolved APIs: `scripting`
+  // and `cookies` only exist once the operator has granted them, so neither may be
+  // captured at construction time.
+  pageContext: createPageContextSource({ logger: console }),
+  requestContext: createRequestContextSource({ logger: console }),
   logger: console,
 });
 

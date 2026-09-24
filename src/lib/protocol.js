@@ -1,10 +1,16 @@
 /**
- * The V1 wire protocol: four message types, three error codes, nothing else.
+ * The wire protocol: the four V1 messages plus the context pair.
  *
- * `docs/architecture-v1.md` freezes this set. There is deliberately no separate
- * ERROR message, no ACK, no heartbeat and no job-created/job-finished
- * notification, so everything the Service needs to learn arrives as either
- * RESULT (about the job that just ran) or STATUS (about Bridge right now).
+ * `docs/current/architecture.md` §8 freezes the V1 set and §14 defines the two
+ * context messages. There is deliberately no separate ERROR message, no ACK, no
+ * heartbeat and no job-created/job-finished notification, so everything the Service
+ * needs to learn about a Job arrives as either RESULT (about the job that just ran)
+ * or STATUS (about Bridge right now).
+ *
+ * `GET_REQUEST_CONTEXT` / `REQUEST_CONTEXT` answer a different question than a Job
+ * does — "what would the browser send to this URL?" — so they carry their own small
+ * error-code set (`CONTEXT_ERROR_CODES` in `request-context.js`) and never touch a
+ * Job's RESULT, `ERROR_CODES` or `isJsonCompatible`.
  *
  * Parsing and building are pure functions of plain data, so the whole contract is
  * exercised by `node --test` without a socket.
@@ -14,12 +20,14 @@
 export const SERVICE_MESSAGE_TYPES = Object.freeze({
   EXECUTE: 'EXECUTE',
   GET_STATUS: 'GET_STATUS',
+  GET_REQUEST_CONTEXT: 'GET_REQUEST_CONTEXT',
 });
 
 /** Messages Bridge may send to the Service. */
 export const BRIDGE_MESSAGE_TYPES = Object.freeze({
   RESULT: 'RESULT',
   STATUS: 'STATUS',
+  REQUEST_CONTEXT: 'REQUEST_CONTEXT',
 });
 
 /** The only V1 error codes. A new code needs a Service that must machine-differentiate. */
@@ -29,7 +37,7 @@ export const ERROR_CODES = Object.freeze({
   SCRIPT_EXECUTION_FAILED: 'SCRIPT_EXECUTION_FAILED',
 });
 
-/** Why a frame could not be turned into a V1 request. Diagnostic only. */
+/** Why a frame could not be turned into a request. Diagnostic only. */
 export const PARSE_FAILURES = Object.freeze({
   NOT_TEXT: 'NOT_TEXT',
   INVALID_JSON: 'INVALID_JSON',
@@ -38,6 +46,8 @@ export const PARSE_FAILURES = Object.freeze({
   MISSING_JOB_ID: 'MISSING_JOB_ID',
   MISSING_SCRIPT: 'MISSING_SCRIPT',
   UNSUPPORTED_INPUT: 'UNSUPPORTED_INPUT',
+  MISSING_REQUEST_ID: 'MISSING_REQUEST_ID',
+  MISSING_TARGET_URL: 'MISSING_TARGET_URL',
 });
 
 function isPlainObject(value) {
@@ -49,22 +59,30 @@ function isPlainObject(value) {
  *
  * Never throws: a Service that sends anything at all must not be able to break
  * the connection handler. A failure reports whether the frame still carried a
- * usable `jobId`, because that is what decides whether Bridge can answer with a
- * RESULT or has to stay silent — there is no ERROR message to fall back on.
+ * usable `jobId` (for a RESULT) or `requestId` (for a REQUEST_CONTEXT), because
+ * that is what decides whether Bridge can answer or has to stay silent — there is
+ * no ERROR message to fall back on.
  *
  * @param {unknown} raw frame payload as received
  * @returns {{
  *   ok: true,
- *   message: {type: string, jobId?: string, script?: string, input?: unknown, metadata?: unknown},
+ *   message: {type: string, jobId?: string, script?: string, input?: unknown, metadata?: unknown, requestId?: string, targetUrl?: string, scope?: unknown, topLevelSite?: unknown, hasCrossSiteAncestor?: unknown},
  * } | {
  *   ok: false,
  *   failure: string,
  *   error: string,
  *   jobId: string | null,
+ *   requestId: string | null,
  * }}
  */
 export function parseServiceMessage(raw) {
-  const fail = (failure, error, jobId = null) => ({ ok: false, failure, error, jobId });
+  const fail = (failure, error, jobId = null, requestId = null) => ({
+    ok: false,
+    failure,
+    error,
+    jobId,
+    requestId,
+  });
 
   if (typeof raw !== 'string') {
     return fail(PARSE_FAILURES.NOT_TEXT, 'Bridge 只接受文本帧。');
@@ -88,6 +106,39 @@ export function parseServiceMessage(raw) {
 
   if (parsed.type === SERVICE_MESSAGE_TYPES.GET_STATUS) {
     return { ok: true, message: { type: SERVICE_MESSAGE_TYPES.GET_STATUS } };
+  }
+
+  // A context request mirrors GET_STATUS's shape: it asks about the browser, not
+  // about a Job, so it carries no jobId. `scope`, `topLevelSite` and
+  // `hasCrossSiteAncestor` are carried through untouched and validated where the
+  // browser APIs are, so that a bad one is answered with a context error the
+  // Service can read rather than a parse failure it cannot.
+  if (parsed.type === SERVICE_MESSAGE_TYPES.GET_REQUEST_CONTEXT) {
+    const requestId =
+      typeof parsed.requestId === 'string' && parsed.requestId !== '' ? parsed.requestId : null;
+    if (requestId === null) {
+      return fail(PARSE_FAILURES.MISSING_REQUEST_ID, 'GET_REQUEST_CONTEXT 缺少非空字符串 requestId。');
+    }
+    // `targetUrl` is required, not defaulted to the Work Tab: without a target
+    // there is no single correct cookie or partition to answer with.
+    if (typeof parsed.targetUrl !== 'string' || parsed.targetUrl === '') {
+      return fail(
+        PARSE_FAILURES.MISSING_TARGET_URL,
+        'GET_REQUEST_CONTEXT 缺少非空字符串 targetUrl。',
+        null,
+        requestId,
+      );
+    }
+
+    const message = {
+      type: SERVICE_MESSAGE_TYPES.GET_REQUEST_CONTEXT,
+      requestId,
+      targetUrl: parsed.targetUrl,
+    };
+    if ('scope' in parsed) message.scope = parsed.scope;
+    if ('topLevelSite' in parsed) message.topLevelSite = parsed.topLevelSite;
+    if ('hasCrossSiteAncestor' in parsed) message.hasCrossSiteAncestor = parsed.hasCrossSiteAncestor;
+    return { ok: true, message };
   }
 
   if (parsed.type !== SERVICE_MESSAGE_TYPES.EXECUTE) {
@@ -131,14 +182,19 @@ export function parseServiceMessage(raw) {
 /**
  * @param {string} jobId
  * @param {unknown} data JSON-compatible script return value
+ * @param {object} [pageContext] the Work Tab's page facts, or the explicit
+ *   "could not be read" value. Always passed by the state machine, so every
+ *   successful RESULT describes the page it ran against.
  */
-export function createResultOk(jobId, data) {
-  return {
+export function createResultOk(jobId, data, pageContext) {
+  const result = {
     type: BRIDGE_MESSAGE_TYPES.RESULT,
     jobId,
     ok: true,
     data: data === undefined ? null : data,
   };
+  if (pageContext !== undefined) result.pageContext = pageContext;
+  return result;
 }
 
 /**
@@ -150,6 +206,37 @@ export function createResultError(jobId, code, message) {
   return {
     type: BRIDGE_MESSAGE_TYPES.RESULT,
     jobId,
+    ok: false,
+    error: { code, message },
+  };
+}
+
+/**
+ * Parallel to `createResultOk`, and separate on purpose: `createResultOk` writes a
+ * `jobId` field, and reusing it here would put a Job-shaped envelope around
+ * something that is not a Job.
+ *
+ * @param {string} requestId echoed verbatim
+ * @param {object} context assembled by `buildRequestContext`
+ */
+export function createRequestContextOk(requestId, context) {
+  return {
+    type: BRIDGE_MESSAGE_TYPES.REQUEST_CONTEXT,
+    requestId,
+    ok: true,
+    context,
+  };
+}
+
+/**
+ * @param {string} requestId echoed verbatim
+ * @param {string} code one of `CONTEXT_ERROR_CODES`
+ * @param {string} message diagnostic; never contains a cookie value
+ */
+export function createRequestContextError(requestId, code, message) {
+  return {
+    type: BRIDGE_MESSAGE_TYPES.REQUEST_CONTEXT,
+    requestId,
     ok: false,
     error: { code, message },
   };
