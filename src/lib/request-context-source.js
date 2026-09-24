@@ -125,16 +125,26 @@ export function createRequestContextSource(options = {}) {
    * mode) an incognito tab has its **own** cookie store, while `getAll` without a
    * `storeId` answers from the service worker's store — the regular profile. That
    * would omit the incognito session and hand back matching regular-profile cookies
-   * instead, so the store is resolved from the tab rather than assumed. A tab no
-   * store claims keeps the default (the worker's own store) and says so.
+   * instead, so the store is resolved from the tab rather than assumed.
+   *
+   * Every tab belongs to exactly one store, so "no store claims this tab" is not a
+   * reason to fall back to the worker's own: the answer would then be a cookie set
+   * from a profile the Work Tab is not in, wearing the Work Tab's name. The context
+   * is refused instead. The same holds when the store list cannot be asked for at
+   * all — without it the store cannot be resolved either.
    */
   async function resolveStoreId(tabId) {
     const { cookies } = resolveApis();
-    if (typeof cookies?.getAllCookieStores !== 'function') return { ok: true, storeId: undefined };
+    if (typeof cookies?.getAllCookieStores !== 'function') {
+      return { ok: false, error: new TypeError('chrome.cookies.getAllCookieStores 不可用') };
+    }
     try {
       const stores = (await cookies.getAllCookieStores()) ?? [];
       const store = stores.find((candidate) => (candidate?.tabIds ?? []).includes(tabId));
-      return { ok: true, storeId: store?.id };
+      if (store === undefined || typeof store.id !== 'string') {
+        return { ok: false, error: new Error('没有 cookie store 认领该 Tab') };
+      }
+      return { ok: true, storeId: store.id };
     } catch (error) {
       return { ok: false, error };
     }

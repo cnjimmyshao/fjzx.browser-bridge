@@ -91,6 +91,8 @@ npm run poc:context  # 请求上下文（16/16）
 - 导航竞争场景每次运行只会落在"如实降级"或"取到某一个已知文档"其中之一；两次运行分别命中过一次，但单次运行不能同时覆盖两种走向。
 - 传输层指纹（TLS/HTTP2）与出口 IP 不在 Bridge 能力范围，本次未测也不承诺。
 - `hostAccessCoverage` 的 `'origin'`/`'unknown'` 分支未在真实浏览器构造（需要人工收窄站点授权），只有单测覆盖。
+- Cookie store 的解析在普通 profile 下实测通过；**隐身 Profile 的独立 store**、以及"没有任何 store 认领该 Tab / store 列表问不到"这两条拒绝路径未在真实浏览器构造，只有单测覆盖。
+- 显式 `scope: null` 按契约拒绝（`INVALID_SCOPE`），POC 未单独构造该帧，只有单测覆盖。
 - 本报告不覆盖 MV3 Worker 空闲回收（见 [既有浏览器观察](2026-09-23-existing-browser-evidence.md)）。
 
 ## 与既有材料的关系

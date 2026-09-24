@@ -58,13 +58,17 @@ test('normalizeTargetUrl refuses embedded credentials instead of rewriting them'
   assert.equal(normalizeTargetUrl('https://user:secret@example.test/media').ok, false);
 });
 
-test('normalizeScope defaults to the strict scope and refuses anything else', () => {
+test('normalizeScope defaults only on omission and refuses anything else', () => {
   assert.deepEqual(normalizeScope(undefined), { ok: true, scope: TARGET_SCOPES.WORK_TAB_ORIGIN });
-  assert.deepEqual(normalizeScope(null), { ok: true, scope: TARGET_SCOPES.WORK_TAB_ORIGIN });
+  assert.deepEqual(normalizeScope(TARGET_SCOPES.WORK_TAB_ORIGIN), {
+    ok: true,
+    scope: TARGET_SCOPES.WORK_TAB_ORIGIN,
+  });
   assert.deepEqual(normalizeScope(TARGET_SCOPES.TARGET_ONLY), { ok: true, scope: TARGET_SCOPES.TARGET_ONLY });
-  // Coercing "ANY" to the strict scope would answer a different question than the
-  // Service asked, so an unknown value is an error.
-  for (const raw of ['ANY', 'work_tab_origin', 42, {}]) {
+  // Coercing "ANY" — or an explicit `null`, which JSON callers send to mean "you
+  // choose" — to the strict scope would answer a different question than the Service
+  // asked, so an unknown value is an error.
+  for (const raw of ['ANY', 'work_tab_origin', 42, {}, null, '']) {
     assert.equal(normalizeScope(raw).ok, false, `${String(raw)} 不应被接受`);
   }
 });
@@ -521,7 +525,7 @@ test('reads cookies for exactly the target URL and includes HttpOnly ones', asyn
       { name: 'theme', value: 'dark', path: '/', httpOnly: false, sameSite: 'lax' },
     ],
   });
-  const outcome = await createSource(stub).read({ tabId: 7, targetUrl: `${WORK_TAB_ORIGIN}/media/1?sign=x` });
+  const outcome = await createSource(stub).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1?sign=x` });
 
   assert.equal(outcome.ok, true);
   assert.equal(outcome.context.cookieHeader, 'sid=secret; theme=dark');
@@ -543,7 +547,7 @@ test('reads cookies for exactly the target URL and includes HttpOnly ones', asyn
     topLevelSite: WORK_TAB_ORIGIN,
     hasCrossSiteAncestor: false,
   });
-  assert.deepEqual(stub.calls.get, [7, 7], '采样前读一次、页面事实之后再确认一次');
+  assert.deepEqual(stub.calls.get, [1, 1], '采样前读一次、页面事实之后再确认一次');
 });
 
 test('partitioned cookies are merged in, and an explicit null skips the partition query', async () => {
@@ -754,12 +758,14 @@ test('reads the cookie store the Work Tab actually lives in', async () => {
     assert.equal(details.storeId, '1', '两个查询都必须落在 Work Tab 自己的 store 上');
   }
 
-  // A tab no store claims keeps the default rather than guessing one.
+  // A tab no store claims is refused rather than answered from the worker's own
+  // store: that would hand back cookies from a profile the Work Tab is not in.
   const orphan = createStubChrome({ cookieStores: [{ id: '0', tabIds: [99] }] });
-  assert.equal((await createSource(orphan).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` })).ok, true);
-  for (const details of orphan.calls.getAll) {
-    assert.equal('storeId' in details, false);
-  }
+  const orphaned = await createSource(orphan).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  assert.equal(orphaned.ok, false);
+  assert.equal(orphaned.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+  assert.match(orphaned.message, /store/);
+  assert.deepEqual(orphan.calls.getAll, [], '没有可归属的 store 时不得读 cookie');
 
   // Failing to enumerate stores is reported instead of silently using the default.
   const failing = createStubChrome({ failCookieStores: true });
@@ -768,6 +774,16 @@ test('reads the cookie store the Work Tab actually lives in', async () => {
   assert.equal(refused.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
   assert.match(refused.message, /store/);
   assert.deepEqual(failing.calls.getAll, []);
+
+  // Without the store list the store cannot be resolved either, so this is the same
+  // refusal rather than a silent default.
+  const blind = createStubChrome();
+  delete blind.cookies.getAllCookieStores;
+  const unresolvable = await createSource(blind).read({ tabId: 1, targetUrl: `${WORK_TAB_ORIGIN}/media/1` });
+  assert.equal(unresolvable.ok, false);
+  assert.equal(unresolvable.code, CONTEXT_ERROR_CODES.CONTEXT_FAILED);
+  assert.match(unresolvable.message, /store/);
+  assert.deepEqual(blind.calls.getAll, []);
 });
 
 test('withheld access to a cross-origin target is reported, not answered with an empty set', async () => {

@@ -90,20 +90,23 @@ export function normalizeTargetUrl(raw) {
 /**
  * Resolve the requested scope, defaulting to the strict one.
  *
- * An unknown scope is refused rather than coerced: quietly treating `"ANY"` as
- * `WORK_TAB_ORIGIN` would hand the Service a different answer than it asked for.
+ * Only an *omitted* scope means "use the default". An unknown scope is refused
+ * rather than coerced — including an explicit `null`, which a JSON caller can
+ * easily send meaning "you choose": quietly treating it as `WORK_TAB_ORIGIN` would
+ * hand the Service a different answer than it asked for, which is the whole point
+ * of refusing.
  *
  * @param {unknown} raw
  * @returns {{ok: true, scope: string} | {ok: false, reason: string}}
  */
 export function normalizeScope(raw) {
-  if (raw === undefined || raw === null) return { ok: true, scope: TARGET_SCOPES.WORK_TAB_ORIGIN };
+  if (raw === undefined) return { ok: true, scope: TARGET_SCOPES.WORK_TAB_ORIGIN };
   if (raw === TARGET_SCOPES.WORK_TAB_ORIGIN || raw === TARGET_SCOPES.TARGET_ONLY) {
     return { ok: true, scope: raw };
   }
   return {
     ok: false,
-    reason: `scope 只能是 ${TARGET_SCOPES.WORK_TAB_ORIGIN} 或 ${TARGET_SCOPES.TARGET_ONLY}。`,
+    reason: `scope 只能是 ${TARGET_SCOPES.WORK_TAB_ORIGIN} 或 ${TARGET_SCOPES.TARGET_ONLY}；省略表示前者。`,
   };
 }
 

@@ -360,7 +360,7 @@ Bridge 不因这两种能力理解任何网站、媒体或业务语义：它只�
 
 - `requestId`：必填，由 Service 提供，用于把应答对上请求。
 - `targetUrl`：**必填**，绝对 http(s) URL，不得内嵌凭据；fragment 会被去掉（它本来就不会被发送）。
-- `scope`：可选，`WORK_TAB_ORIGIN`（默认，目标必须与 Work Tab 同源）或 `TARGET_ONLY`（显式允许跨源目标）。其他值一律 `INVALID_SCOPE`，不静默取默认值。
+- `scope`：可选，`WORK_TAB_ORIGIN`（默认，目标必须与 Work Tab 同源）或 `TARGET_ONLY`（显式允许跨源目标）。**只有省略才表示默认值**；其他值（包括显式 `null`）一律 `INVALID_SCOPE`，不静默取默认值。
 - `topLevelSite`：可选，显式指定分区查询用的顶层站点；只接受 Work Tab 自身的 origin，或 `null`（表示不做分区查询）；省略表示使用 Work Tab 自身的 origin。其他值 `INVALID_PARTITION`。
 - `hasCrossSiteAncestor`：可选 boolean，显式指定 CHIPS 分区键的这一位；省略时按两个 schemeful site 推导（同站 `false`，跨站 `true`）。非 boolean 一律 `INVALID_PARTITION`。
 
@@ -392,7 +392,7 @@ Bridge 不因这两种能力理解任何网站、媒体或业务语义：它只�
 新增 `scripting`（读 Work Tab 页面自己的 UA / referrer，worker 代答不了）与 `cookies`（读取一个明确 URL 的 Cookie；`cookies` 权限本身不新增安装警告）。
 
 - 读取范围由 `chrome.cookies.getAll({ url })` 与 host 权限共同限制：**Bridge 从不用 `getAll({})` 或 `getAll({domain})`**，不枚举、不导出整个 Cookie 库。
-- Cookie 值只出现在 `cookieHeader` 与 `cookies[].value` 之外的字段一律不出现；诊断、错误消息与日志只使用 cookie **名字**，且不落盘。唯一持久配置仍是 Service URL。
+- Cookie 值只出现在 `cookieHeader` 里；`cookies[]` 是**不含 value** 的元数据白名单（name / domain / path / secure / httpOnly / sameSite / session / partitioned / topLevelSite），诊断、错误消息与日志只使用 cookie **名字**，且不落盘。唯一持久配置仍是 Service URL。
 - host 权限按**每个 cookie** 静默过滤，所以"看不见"与"没有"无法区分。Bridge 因此显式报告覆盖范围：整块 `<all_urls>` 授权仍在 → `hostAccessCoverage: "all"`（不可能有 cookie 被逐条过滤）；只剩目标 origin → `"origin"`（父域 cookie 可能已被静默丢弃，不宣称完整）；权限 API 问不到 → `"unknown"`；目标 origin 完全不在授权内 → `CONTEXT_FAILED`（不猜可注册域：不带 PSL 的猜测会在 `co.uk`/`github.io` 上判错）。
 
 ### 14.4 实测约束
